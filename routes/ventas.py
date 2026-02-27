@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from dependencies import obtener_usuario_actual
 from database import supabase
 from datetime import datetime
 import uuid
+
+from main import get_current_user  # IMPORTANTE
 
 router = APIRouter(prefix="/ventas", tags=["Ventas"])
 
@@ -22,7 +23,6 @@ class VentaCrear(BaseModel):
     metodo_pago: str
     items: list[ItemVenta]
     id_sucursal: str | None = None
-    id_sesion: str | None = None
 
 
 # ==============================
@@ -30,11 +30,29 @@ class VentaCrear(BaseModel):
 # ==============================
 
 @router.post("/")
-def crear_venta(datos: VentaCrear, usuario=Depends(obtener_usuario_actual)):
+def crear_venta(datos: VentaCrear, usuario=Depends(get_current_user)):
 
     id_raiz = usuario.get("id_raiz")
     id_usuario = usuario.get("id_usuario")
-    
+    nivel = usuario.get("nivel")
+    id_sucursal_usuario = usuario.get("id_sucursal")
+
+    if not id_raiz:
+        raise HTTPException(status_code=400, detail="Usuario sin id_raiz")
+
+    # =============================
+    # DETERMINAR SUCURSAL REAL
+    # =============================
+
+    if nivel in ["admin_master", "usuario"]:
+        if not datos.id_sucursal:
+            raise HTTPException(status_code=400, detail="Debe especificar sucursal")
+        id_sucursal = datos.id_sucursal
+    else:
+        if not id_sucursal_usuario:
+            raise HTTPException(status_code=403, detail="Vendedor sin sucursal asignada")
+        id_sucursal = id_sucursal_usuario
+
     # =============================
     # OBTENER SESIÓN ABIERTA
     # =============================
@@ -42,6 +60,7 @@ def crear_venta(datos: VentaCrear, usuario=Depends(obtener_usuario_actual)):
     sesion = supabase.table("sesiones_caja") \
         .select("*") \
         .eq("id_raiz", id_raiz) \
+        .eq("id_sucursal", id_sucursal) \
         .eq("abierta", True) \
         .execute()
 
@@ -49,9 +68,6 @@ def crear_venta(datos: VentaCrear, usuario=Depends(obtener_usuario_actual)):
         raise HTTPException(status_code=400, detail="No hay caja abierta")
 
     id_sesion = sesion.data[0]["id"]
-
-    if not id_raiz:
-        raise HTTPException(status_code=400, detail="Usuario sin id_raiz")
 
     # =============================
     # VALIDAR CLIENTE
@@ -79,6 +95,7 @@ def crear_venta(datos: VentaCrear, usuario=Depends(obtener_usuario_actual)):
             .select("*") \
             .eq("id", item.id_producto) \
             .eq("id_raiz", id_raiz) \
+            .eq("id_sucursal", id_sucursal) \
             .execute()
 
         if not producto.data:
@@ -98,13 +115,18 @@ def crear_venta(datos: VentaCrear, usuario=Depends(obtener_usuario_actual)):
         subtotal = precio * item.cantidad
         total += subtotal
 
-        # Descontar stock de forma segura en base de datos
+        detalles.append({
+            "id_producto": item.id_producto,
+            "cantidad": item.cantidad,
+            "precio_unitario": precio,
+            "subtotal": subtotal
+        })
+
+        # Descontar stock vía RPC
         resultado_stock = supabase.rpc("descontar_stock", {
             "producto_id": item.id_producto,
             "cantidad": item.cantidad
         }).execute()
-
-        print("RESULTADO STOCK:", resultado_stock.data)
 
         if not resultado_stock.data:
             raise HTTPException(
@@ -123,7 +145,7 @@ def crear_venta(datos: VentaCrear, usuario=Depends(obtener_usuario_actual)):
         "id_cliente": datos.id_cliente,
         "id_usuario": id_usuario,
         "id_raiz": id_raiz,
-        "id_sucursal": datos.id_sucursal,
+        "id_sucursal": id_sucursal,
         "total": total,
         "metodo_pago": datos.metodo_pago,
         "fecha": datetime.utcnow().isoformat()
@@ -145,7 +167,8 @@ def crear_venta(datos: VentaCrear, usuario=Depends(obtener_usuario_actual)):
             "cantidad": d["cantidad"],
             "precio_unitario": d["precio_unitario"],
             "subtotal": d["subtotal"],
-            "id_raiz": id_raiz
+            "id_raiz": id_raiz,
+            "id_sucursal": id_sucursal
         }).execute()
 
     # =============================
@@ -159,7 +182,7 @@ def crear_venta(datos: VentaCrear, usuario=Depends(obtener_usuario_actual)):
         "monto": total,
         "id_usuario": id_usuario,
         "id_raiz": id_raiz,
-        "id_sucursal": datos.id_sucursal,
+        "id_sucursal": id_sucursal,
         "fecha": datetime.utcnow().isoformat()
     }).execute()
 
@@ -169,7 +192,7 @@ def crear_venta(datos: VentaCrear, usuario=Depends(obtener_usuario_actual)):
 
     supabase.table("auditoria_tienda").insert({
         "id_raiz": id_raiz,
-        "id_sucursal": datos.id_sucursal,
+        "id_sucursal": id_sucursal,
         "id_usuario": id_usuario,
         "accion": "CREAR_VENTA",
         "descripcion": f"Venta creada folio {folio} por {total}",

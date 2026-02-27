@@ -22,6 +22,10 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 def get_current_user(token: str = Depends(oauth2_scheme)):
     payload = verificar_token(token)
+
+    if not payload.get("id_raiz"):
+        raise HTTPException(status_code=403, detail="Token inválido")
+
     return payload
 
 
@@ -183,7 +187,8 @@ def login(datos: LoginData):
             token = crear_token({
                 "id_usuario": usuario.get("id"),
                 "id_raiz": usuario.get("id"),
-                "nivel": usuario.get("nivel")
+                "nivel": usuario.get("nivel"),
+                "id_sucursal": usuario.get("id_sucursal")
             })
             return {"access_token": token, "token_type": "bearer"}
 
@@ -217,7 +222,8 @@ def login(datos: LoginData):
         token = crear_token({
             "id_usuario": usuario.get("id"),
             "id_raiz": usuario.get("id_raiz"),
-            "nivel": usuario.get("nivel")
+            "nivel": usuario.get("nivel"),
+            "id_sucursal": usuario.get("id_sucursal")
         })
 
         return {"access_token": token, "token_type": "bearer"}
