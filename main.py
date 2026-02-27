@@ -18,6 +18,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    payload = verificar_token(token)
+    return payload
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -29,10 +36,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(usuarios_router)
-app.include_router(clientes_router)
-app.include_router(inventario_router)
-app.include_router(ventas_router)
-app.include_router(caja_router)
+
+app.include_router(
+    clientes_router,
+    dependencies=[Depends(get_current_user)]
+)
+
+app.include_router(
+    inventario_router,
+    dependencies=[Depends(get_current_user)]
+)
+
+app.include_router(
+    ventas_router,
+    dependencies=[Depends(get_current_user)]
+)
+
+app.include_router(
+    caja_router,
+    dependencies=[Depends(get_current_user)]
+)
 
 # =================================
 # CONFIGURACIÓN
@@ -41,8 +64,6 @@ app.include_router(caja_router)
 
 SECRET_KEY = "c4d4352f2f4bd29f6e892ac00572984cb3cb69b12e243cef776c71abdc430cf4f541f18b6c986d7181153cae4c4f4d4b02890d3a827e1324b34e330696aadeee"
 ALGORITHM = "HS256"
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 
 @app.get("/me")
