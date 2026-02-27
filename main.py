@@ -13,30 +13,32 @@ from routes.caja import router as caja_router
 from fastapi.middleware.cors import CORSMiddleware
 
 
-
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "https://tu-frontend-en-produccion.com"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(usuarios_router)
 app.include_router(clientes_router)
 app.include_router(inventario_router)
 app.include_router(ventas_router)
 app.include_router(caja_router)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://tudominio.com"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
 # =================================
 # CONFIGURACIÓN
 # =================================
 
 
-
 SECRET_KEY = "c4d4352f2f4bd29f6e892ac00572984cb3cb69b12e243cef776c71abdc430cf4f541f18b6c986d7181153cae4c4f4d4b02890d3a827e1324b34e330696aadeee"
 ALGORITHM = "HS256"
-
 
 
 # =================================
@@ -46,7 +48,6 @@ ALGORITHM = "HS256"
 class LoginData(BaseModel):
     correo: str
     contrasena: str
-
 
 
 # =================================
