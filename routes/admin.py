@@ -12,8 +12,7 @@ def listar_tiendas(usuario = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="No autorizado")
 
     usuarios = supabase.table("usuarios") \
-        .select("id, nombre, correo, nivel") \
-        .eq("nivel", "usuario") \
+        .select("*") \
         .execute()
 
     return usuarios.data
