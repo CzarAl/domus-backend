@@ -14,19 +14,11 @@ from routes.inventario import router as inventario_router
 from routes.ventas import router as ventas_router
 from routes.caja import router as caja_router
 from fastapi.middleware.cors import CORSMiddleware
+from dependencies import get_current_user
 
 
 app = FastAPI()
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
-
-def get_current_user(token: str = Depends(oauth2_scheme)):
-    payload = verificar_token(token)
-
-    if not payload.get("id_raiz"):
-        raise HTTPException(status_code=403, detail="Token inválido")
-
-    return payload
 
 
 app.add_middleware(
@@ -71,9 +63,8 @@ ALGORITHM = "HS256"
 
 
 @app.get("/me")
-def validar_usuario(token: str = Depends(oauth2_scheme)):
-    payload = verificar_token(token)
-    return {"usuario": payload}
+def validar_usuario(usuario = Depends(get_current_user)):
+    return {"usuario": usuario}
 
 # =================================
 # MODELO LOGIN

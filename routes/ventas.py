@@ -4,7 +4,7 @@ from database import supabase
 from datetime import datetime
 import uuid
 
-from main import get_current_user  # IMPORTANTE
+from dependencies import get_current_user
 
 router = APIRouter(prefix="/ventas", tags=["Ventas"])
 

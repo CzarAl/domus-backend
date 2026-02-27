@@ -1,15 +1,13 @@
-from fastapi import HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends, HTTPException
+from fastapi.security import OAuth2PasswordBearer
 from auth import verificar_token
 
-security = HTTPBearer()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
-def obtener_usuario_actual(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-):
-
-    token = credentials.credentials
-
+def get_current_user(token: str = Depends(oauth2_scheme)):
     payload = verificar_token(token)
+
+    if not payload.get("id_raiz"):
+        raise HTTPException(status_code=403, detail="Token inválido")
 
     return payload

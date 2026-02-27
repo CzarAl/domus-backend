@@ -2,9 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
 import uuid
-
+from dependencies import get_current_user
 from database import supabase
-from main import get_current_user  # IMPORTANTE
+
 
 router = APIRouter(prefix="/clientes", tags=["Clientes"])
 

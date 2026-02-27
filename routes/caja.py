@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from database import supabase
 from datetime import datetime
-from main import get_current_user
+from dependencies import get_current_user
 import uuid
 
 router = APIRouter(prefix="/caja", tags=["Caja"])
