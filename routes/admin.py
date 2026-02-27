@@ -11,4 +11,9 @@ def listar_tiendas(usuario = Depends(get_current_user)):
     if usuario.get("nivel") != "admin_master":
         raise HTTPException(status_code=403, detail="No autorizado")
 
-    return {"mensaje": "admin endpoint funcionando"}
+    usuarios = supabase.table("usuarios") \
+        .select("id, nombre, correo, nivel") \
+        .eq("nivel", "usuario") \
+        .execute()
+
+    return usuarios.data
