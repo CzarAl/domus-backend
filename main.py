@@ -1,10 +1,13 @@
 from fastapi import FastAPI, HTTPException
+from fastapi import Depends
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 import bcrypt
 import datetime
 from datetime import timedelta
 from routes.usuarios import router as usuarios_router
 from auth import crear_token
+from auth import verificar_token
 from routes.clientes import router as clientes_router
 from database import supabase
 from routes.inventario import router as inventario_router
@@ -17,8 +20,11 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001"
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -36,6 +42,13 @@ app.include_router(caja_router)
 SECRET_KEY = "c4d4352f2f4bd29f6e892ac00572984cb3cb69b12e243cef776c71abdc430cf4f541f18b6c986d7181153cae4c4f4d4b02890d3a827e1324b34e330696aadeee"
 ALGORITHM = "HS256"
 
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+
+@app.get("/me")
+def validar_usuario(token: str = Depends(oauth2_scheme)):
+    payload = verificar_token(token)
+    return {"usuario": payload}
 
 # =================================
 # MODELO LOGIN
