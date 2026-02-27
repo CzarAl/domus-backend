@@ -15,6 +15,7 @@ from routes.ventas import router as ventas_router
 from routes.caja import router as caja_router
 from fastapi.middleware.cors import CORSMiddleware
 from dependencies import get_current_user
+from routes.admin import router as admin_router
 
 
 app = FastAPI()
@@ -50,6 +51,11 @@ app.include_router(
 
 app.include_router(
     caja_router,
+    dependencies=[Depends(get_current_user)]
+)
+
+app.include_router(
+    admin_router,
     dependencies=[Depends(get_current_user)]
 )
 
