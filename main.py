@@ -1,26 +1,27 @@
-from fastapi import FastAPI, HTTPException
-from fastapi import Depends
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 import bcrypt
-import datetime
-from datetime import timedelta
-from routes.usuarios import router as usuarios_router
-from auth import crear_token
-from auth import verificar_token
-from routes.clientes import router as clientes_router
+from fastapi.middleware.cors import CORSMiddleware
+
 from database import supabase
+from auth import crear_access_token, crear_refresh_token, verificar_token
+from dependencies import get_current_user
+
+from routes.usuarios import router as usuarios_router
+from routes.clientes import router as clientes_router
 from routes.inventario import router as inventario_router
 from routes.ventas import router as ventas_router
 from routes.caja import router as caja_router
-from fastapi.middleware.cors import CORSMiddleware
-from dependencies import get_current_user
 from routes.admin import router as admin_router
+from routes.dashboard import router as dashboard_router
 
 
 app = FastAPI()
 
 
+# =================================
+# CORS
+# =================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,53 +33,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# =================================
+# ROUTERS
+# =================================
+
 app.include_router(usuarios_router)
 
-app.include_router(
-    clientes_router,
-    dependencies=[Depends(get_current_user)]
-)
+app.include_router(clientes_router, dependencies=[Depends(get_current_user)])
+app.include_router(inventario_router, dependencies=[Depends(get_current_user)])
+app.include_router(ventas_router, dependencies=[Depends(get_current_user)])
+app.include_router(caja_router, dependencies=[Depends(get_current_user)])
+app.include_router(admin_router, dependencies=[Depends(get_current_user)])
+app.include_router(dashboard_router, dependencies=[Depends(get_current_user)])
 
-app.include_router(
-    inventario_router,
-    dependencies=[Depends(get_current_user)]
-)
-
-app.include_router(
-    ventas_router,
-    dependencies=[Depends(get_current_user)]
-)
-
-app.include_router(
-    caja_router,
-    dependencies=[Depends(get_current_user)]
-)
-
-app.include_router(
-    admin_router,
-    dependencies=[Depends(get_current_user)]
-)
 
 # =================================
-# CONFIGURACIÓN
-# =================================
-
-
-SECRET_KEY = "c4d4352f2f4bd29f6e892ac00572984cb3cb69b12e243cef776c71abdc430cf4f541f18b6c986d7181153cae4c4f4d4b02890d3a827e1324b34e330696aadeee"
-ALGORITHM = "HS256"
-
-
-@app.get("/me")
-def validar_usuario(usuario = Depends(get_current_user)):
-    return {"usuario": usuario}
-
-# =================================
-# MODELO LOGIN
+# MODELOS
 # =================================
 
 class LoginData(BaseModel):
     correo: str
     contrasena: str
+
+
+class SeleccionarEmpresa(BaseModel):
+    id_empresa: str
+
+
+class RefreshData(BaseModel):
+    refresh_token: str
 
 
 # =================================
@@ -89,6 +74,16 @@ class LoginData(BaseModel):
 def home():
     return {"mensaje": "Domus SaaS API activa"}
 
+
+# =================================
+# VALIDAR TOKEN
+# =================================
+
+@app.get("/me")
+def validar_usuario(usuario = Depends(get_current_user)):
+    return {"usuario": usuario}
+
+
 # =================================
 # LOGIN
 # =================================
@@ -96,137 +91,135 @@ def home():
 @app.post("/login")
 def login(datos: LoginData):
 
-    try:
-        # ==============================
-        # BUSCAR USUARIO
-        # ==============================
-        respuesta = supabase.table("usuarios") \
-            .select("*") \
-            .eq("correo", datos.correo) \
-            .execute()
+    respuesta = supabase.table("usuarios") \
+        .select("*") \
+        .eq("email", datos.correo) \
+        .execute()
 
-        if not respuesta.data:
-            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+    if not respuesta.data:
+        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
 
-        usuario = respuesta.data[0]
+    usuario = respuesta.data[0]
 
-        password_guardado = usuario.get("contrasena")
-        if not password_guardado:
-            raise HTTPException(status_code=500, detail="Usuario sin contraseña registrada")
+    if not usuario.get("activo"):
+        raise HTTPException(status_code=403, detail="Usuario inactivo")
 
-        # ==============================
-        # VERIFICAR BLOQUEO
-        # ==============================
-        bloqueado_hasta = usuario.get("bloqueado_hasta")
-        esta_bloqueado = False
+    if not bcrypt.checkpw(
+        datos.contrasena.encode("utf-8"),
+        usuario["password_hash"].encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
 
-        if bloqueado_hasta:
-            bloqueado_dt = datetime.datetime.fromisoformat(bloqueado_hasta)
-            if datetime.datetime.utcnow() < bloqueado_dt:
-                esta_bloqueado = True
+    # ADMIN MASTER
+    if usuario.get("nivel_global") == "admin_master":
 
-        # ==============================
-        # VALIDAR CONTRASEÑA
-        # ==============================
-        password_correcta = bcrypt.checkpw(
-            datos.contrasena.encode("utf-8"),
-            password_guardado.encode("utf-8")
-        )
-
-        # ❌ Contraseña incorrecta
-        if not password_correcta:
-
-            # Si está bloqueado → mantener bloqueo
-            if esta_bloqueado:
-                raise HTTPException(status_code=403, detail="Cuenta bloqueada temporalmente")
-
-            intentos = (usuario.get("intentos_fallidos") or 0) + 1
-
-            update_data = {
-                "intentos_fallidos": intentos
-            }
-
-            if intentos >= 5:
-                bloqueo = datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
-                update_data["bloqueado_hasta"] = bloqueo.isoformat()
-
-            supabase.table("usuarios") \
-                .update(update_data) \
-                .eq("id", usuario["id"]) \
-                .execute()
-
-            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-
-        # ✅ Contraseña correcta
-
-        # Si estaba bloqueado → desbloquear
-        if esta_bloqueado:
-            supabase.table("usuarios") \
-                .update({
-                    "intentos_fallidos": 0,
-                    "bloqueado_hasta": None
-                }) \
-                .eq("id", usuario["id"]) \
-                .execute()
-        else:
-            # Reset normal
-            supabase.table("usuarios") \
-                .update({
-                    "intentos_fallidos": 0
-                }) \
-                .eq("id", usuario["id"]) \
-                .execute()
-
-        # ==============================
-        # ADMIN MASTER
-        # ==============================
-        if usuario.get("nivel") == "admin_master":
-            token = crear_token({
-                "id_usuario": usuario.get("id"),
-                "id_raiz": usuario.get("id"),
-                "nivel": usuario.get("nivel"),
-                "id_sucursal": usuario.get("id_sucursal")
-            })
-            return {"access_token": token, "token_type": "bearer"}
-
-        # ==============================
-        # VALIDAR SUSCRIPCIÓN
-        # ==============================
-        if usuario.get("nivel") == "usuario":
-
-            suscripcion = supabase.table("suscripciones") \
-                .select("*") \
-                .eq("id_usuario", usuario.get("id")) \
-                .execute()
-
-            if not suscripcion.data:
-                raise HTTPException(status_code=403, detail="Suscripción pendiente de pago")
-
-            sub = suscripcion.data[0]
-
-            if sub.get("estado") != "activa":
-                raise HTTPException(status_code=403, detail="Suscripción no activa")
-
-            fecha_vencimiento = sub.get("fecha_vencimiento")
-            if fecha_vencimiento:
-                fecha_vencimiento = datetime.datetime.fromisoformat(fecha_vencimiento)
-                if datetime.datetime.utcnow() > fecha_vencimiento:
-                    raise HTTPException(status_code=403, detail="Suscripción vencida")
-
-        # ==============================
-        # TOKEN FINAL
-        # ==============================
-        token = crear_token({
-            "id_usuario": usuario.get("id"),
-            "id_raiz": usuario.get("id_raiz"),
-            "nivel": usuario.get("nivel"),
-            "id_sucursal": usuario.get("id_sucursal")
+        access_token = crear_access_token({
+            "id_usuario": usuario["id"],
+            "nivel_global": usuario["nivel_global"]
         })
 
-        return {"access_token": token, "token_type": "bearer"}
+        refresh_token = crear_refresh_token({
+            "id_usuario": usuario["id"]
+        })
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("ERROR REAL:", e)
-        raise HTTPException(status_code=500, detail="Error interno del servidor")
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer"
+        }
+
+    # EMPRESAS
+    empresas_resp = supabase.table("usuarios_empresas") \
+        .select("id_empresa, rol") \
+        .eq("id_usuario", usuario["id"]) \
+        .eq("activo", True) \
+        .execute()
+
+    empresas = empresas_resp.data
+
+    if not empresas:
+        return {"status": "crear_empresa"}
+
+    if len(empresas) == 1:
+        empresa = empresas[0]
+
+        access_token = crear_access_token({
+            "id_usuario": usuario["id"],
+            "id_empresa": empresa["id_empresa"],
+            "rol": empresa["rol"],
+            "nivel_global": usuario["nivel_global"]
+        })
+
+        refresh_token = crear_refresh_token({
+            "id_usuario": usuario["id"]
+        })
+
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer"
+        }
+
+    return {
+        "status": "seleccionar_empresa",
+        "empresas": empresas
+    }
+
+
+# =================================
+# SELECCIONAR EMPRESA
+# =================================
+
+@app.post("/seleccionar-empresa")
+def seleccionar_empresa(datos: SeleccionarEmpresa, usuario = Depends(get_current_user)):
+
+    resp = supabase.table("usuarios_empresas") \
+        .select("rol") \
+        .eq("id_usuario", usuario["id_usuario"]) \
+        .eq("id_empresa", datos.id_empresa) \
+        .eq("activo", True) \
+        .execute()
+
+    if not resp.data:
+        raise HTTPException(status_code=403, detail="No tienes acceso a esta empresa")
+
+    rol = resp.data[0]["rol"]
+
+    access_token = crear_access_token({
+        "id_usuario": usuario["id_usuario"],
+        "id_empresa": datos.id_empresa,
+        "rol": rol,
+        "nivel_global": usuario.get("nivel_global")
+    })
+
+    refresh_token = crear_refresh_token({
+        "id_usuario": usuario["id_usuario"]
+    })
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
+
+
+# =================================
+# REFRESH
+# =================================
+
+@app.post("/refresh")
+def refresh_token(data: RefreshData):
+
+    payload = verificar_token(data.refresh_token)
+
+    if payload.get("type") != "refresh":
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    nuevo_access = crear_access_token({
+        "id_usuario": payload["id_usuario"]
+    })
+
+    return {
+        "access_token": nuevo_access,
+        "token_type": "bearer"
+    }
