@@ -138,6 +138,8 @@ def login(datos: LoginData):
         usuario["password_hash"].encode("utf-8")
     ):
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+    
+    supabase.rpc("motor_financiero_saas").execute()
 
     # 🔥 TOKEN CORRECTO CON id_usuario Y nivel_global
     access_token = crear_access_token({

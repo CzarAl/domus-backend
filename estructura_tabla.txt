@@ -1,0 +1,1414 @@
+| pg_get_functiondef                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| CREATE OR REPLACE FUNCTION public.bloquear_operaciones_si_suspendida()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    empresa_id uuid;
+BEGIN
+
+    -- Detectar empresa según tipo de operación
+    IF TG_OP = 'DELETE' THEN
+        BEGIN
+            empresa_id := OLD.id_empresa;
+        EXCEPTION WHEN undefined_column THEN
+            BEGIN
+                empresa_id := OLD.id_empresa_matriz;
+            EXCEPTION WHEN undefined_column THEN
+                empresa_id := NULL;
+            END;
+        END;
+    ELSE
+        BEGIN
+            empresa_id := NEW.id_empresa;
+        EXCEPTION WHEN undefined_column THEN
+            BEGIN
+                empresa_id := NEW.id_empresa_matriz;
+            EXCEPTION WHEN undefined_column THEN
+                empresa_id := NULL;
+            END;
+        END;
+    END IF;
+
+    -- Si no hay empresa asociada, permitir
+    IF empresa_id IS NULL THEN
+        RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+    END IF;
+
+    -- Verificar suspensión
+    IF EXISTS (
+        SELECT 1
+        FROM empresas
+        WHERE id = empresa_id
+          AND estado = 'suspendida'
+    ) THEN
+        RAISE EXCEPTION 'Empresa suspendida. No puede realizar operaciones.';
+    END IF;
+
+    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| CREATE OR REPLACE FUNCTION public.restaurar_empresa_desde_backup(p_id_backup uuid)
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    backup_data jsonb;
+    empresa_id uuid;
+BEGIN
+
+    SELECT datos INTO backup_data
+    FROM empresas_backup
+    WHERE id = p_id_backup;
+
+    IF backup_data IS NULL THEN
+        RAISE EXCEPTION 'Backup no encontrado';
+    END IF;
+
+    empresa_id := (backup_data->'empresa'->>'id')::uuid;
+
+    -- Limpieza total previa
+    DELETE FROM cuentas_matriz WHERE id_empresa_matriz = empresa_id;
+    DELETE FROM suscripciones WHERE id_empresa = empresa_id;
+    DELETE FROM clientes WHERE id_empresa = empresa_id;
+    DELETE FROM productos WHERE id_empresa = empresa_id;
+    DELETE FROM ventas WHERE id_empresa = empresa_id;
+    DELETE FROM vendedores WHERE id_empresa = empresa_id;
+    DELETE FROM sucursales WHERE id_empresa = empresa_id;
+    DELETE FROM usuarios_empresas WHERE id_empresa = empresa_id;
+    DELETE FROM empresas WHERE id = empresa_id;
+
+    -- Restaurar empresa
+    INSERT INTO empresas
+    SELECT * FROM jsonb_populate_record(NULL::empresas, backup_data->'empresa');
+
+    -- Restaurar arrays solo si existen
+    IF jsonb_typeof(backup_data->'suscripciones') = 'array' THEN
+        INSERT INTO suscripciones
+        SELECT * FROM jsonb_populate_recordset(NULL::suscripciones, backup_data->'suscripciones');
+    END IF;
+
+    IF jsonb_typeof(backup_data->'cuentas_matriz') = 'array' THEN
+        INSERT INTO cuentas_matriz
+        SELECT * FROM jsonb_populate_recordset(NULL::cuentas_matriz, backup_data->'cuentas_matriz');
+    END IF;
+
+    IF jsonb_typeof(backup_data->'clientes') = 'array' THEN
+        INSERT INTO clientes
+        SELECT * FROM jsonb_populate_recordset(NULL::clientes, backup_data->'clientes');
+    END IF;
+
+    IF jsonb_typeof(backup_data->'productos') = 'array' THEN
+        INSERT INTO productos
+        SELECT * FROM jsonb_populate_recordset(NULL::productos, backup_data->'productos');
+    END IF;
+
+    IF jsonb_typeof(backup_data->'ventas') = 'array' THEN
+        INSERT INTO ventas
+        SELECT * FROM jsonb_populate_recordset(NULL::ventas, backup_data->'ventas');
+    END IF;
+
+    IF jsonb_typeof(backup_data->'vendedores') = 'array' THEN
+        INSERT INTO vendedores
+        SELECT * FROM jsonb_populate_recordset(NULL::vendedores, backup_data->'vendedores');
+    END IF;
+
+    IF jsonb_typeof(backup_data->'sucursales') = 'array' THEN
+        INSERT INTO sucursales
+        SELECT * FROM jsonb_populate_recordset(NULL::sucursales, backup_data->'sucursales');
+    END IF;
+
+    IF jsonb_typeof(backup_data->'usuarios_empresas') = 'array' THEN
+        INSERT INTO usuarios_empresas
+        SELECT * FROM jsonb_populate_recordset(NULL::usuarios_empresas, backup_data->'usuarios_empresas');
+    END IF;
+
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| CREATE OR REPLACE FUNCTION public.validar_limite_sucursales()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    total_actual INTEGER;
+    limite_plan INTEGER;
+BEGIN
+    -- Contar sucursales actuales
+    SELECT COUNT(*)
+    INTO total_actual
+    FROM sucursales
+    WHERE id_empresa = NEW.id_empresa;
+
+    -- Obtener límite del plan activo
+    SELECT p.limite_sucursales
+    INTO limite_plan
+    FROM suscripciones s
+    JOIN planes p ON s.id_plan = p.id
+    WHERE s.id_empresa = NEW.id_empresa
+    AND s.estado = 'activa'
+    LIMIT 1;
+
+    -- Si no hay plan activo, bloquear
+    IF limite_plan IS NULL THEN
+        RAISE EXCEPTION 'No existe suscripción activa para esta empresa.';
+    END IF;
+
+    -- Validar límite
+    IF total_actual >= limite_plan THEN
+        RAISE EXCEPTION 'Límite de sucursales alcanzado para el plan actual.';
+    END IF;
+
+    RETURN NEW;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| CREATE OR REPLACE FUNCTION public.procesar_pago_cuenta()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+
+    IF NEW.estado = 'pagada' AND OLD.estado <> 'pagada' THEN
+
+        -- 1️⃣ Cerrar ajustes del mismo periodo
+        UPDATE cuentas_matriz
+        SET estado = 'pagada'
+        WHERE id_empresa_matriz = NEW.id_empresa_matriz
+          AND tipo = 'ajuste'
+          AND periodo_fin = NEW.periodo_fin
+          AND estado <> 'pagada';
+
+        -- 2️⃣ Marcar notificaciones como atendidas
+        UPDATE notificaciones_pendientes
+        SET atendido = true
+        WHERE id_empresa = NEW.id_empresa_matriz
+          AND tipo = 'aviso_vencimiento'
+          AND atendido = false;
+
+    END IF;
+
+    RETURN NEW;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| CREATE OR REPLACE FUNCTION public.validar_limite_vendedores()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    total_actual INTEGER;
+    limite_plan INTEGER;
+BEGIN
+    -- Solo validar si el rol es vendedor
+    IF NEW.rol <> 'vendedor' THEN
+        RETURN NEW;
+    END IF;
+
+    -- Contar vendedores activos actuales
+    SELECT COUNT(*)
+    INTO total_actual
+    FROM usuarios_empresas
+    WHERE id_empresa = NEW.id_empresa
+      AND rol = 'vendedor'
+      AND activo = TRUE;
+
+    -- Obtener límite del plan activo
+    SELECT p.limite_vendedores
+    INTO limite_plan
+    FROM suscripciones s
+    JOIN planes p ON s.id_plan = p.id
+    WHERE s.id_empresa = NEW.id_empresa
+      AND s.estado = 'activa'
+    LIMIT 1;
+
+    -- Si no hay plan activo, bloquear
+    IF limite_plan IS NULL THEN
+        RAISE EXCEPTION 'No existe suscripción activa para esta empresa.';
+    END IF;
+
+    -- Validar límite
+    IF total_actual >= limite_plan THEN
+        RAISE EXCEPTION 'Límite de vendedores alcanzado para el plan actual.';
+    END IF;
+
+    RETURN NEW;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| CREATE OR REPLACE FUNCTION public.generar_ajuste_vendedor()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    plan RECORD;
+    periodo RECORD;
+    total_vendedores integer;
+    exceso integer;
+    factor numeric;
+    monto numeric;
+BEGIN
+
+    -- Contar vendedores activos actuales
+    SELECT COUNT(*) INTO total_vendedores
+    FROM vendedores
+    WHERE id_empresa = NEW.id_empresa
+      AND activo = true;
+
+    -- Obtener plan de la empresa
+    SELECT p.*
+    INTO plan
+    FROM suscripciones s
+    JOIN planes p ON p.id = s.id_plan
+    WHERE s.id_empresa = NEW.id_empresa
+      AND s.estado = 'activa';
+
+    IF plan IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    -- Calcular exceso
+    exceso := total_vendedores - plan.limite_vendedores;
+
+    IF exceso <= 0 THEN
+        RETURN NEW;
+    END IF;
+
+    -- Obtener periodo base activo actual
+    SELECT *
+    INTO periodo
+    FROM cuentas_matriz
+    WHERE id_empresa_matriz = NEW.id_empresa
+      AND tipo = 'base'
+      AND estado <> 'vencida'
+    ORDER BY periodo_fin DESC
+    LIMIT 1;
+
+    IF periodo IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    -- Calcular proporcional
+    factor := calcular_factor_proporcional(
+        periodo.periodo_inicio,
+        periodo.periodo_fin,
+        CURRENT_DATE
+    );
+
+    monto := plan.costo_vendedor_extra * factor;
+
+    -- Insertar ajuste
+    INSERT INTO cuentas_matriz (
+        id_empresa_matriz,
+        periodo_inicio,
+        periodo_fin,
+        monto_total,
+        estado,
+        tipo,
+        recurso,
+        cantidad,
+        costo_unitario,
+        fecha_vencimiento
+    )
+    VALUES (
+        NEW.id_empresa,
+        CURRENT_DATE,
+        periodo.periodo_fin,
+        monto,
+        'activa',
+        'ajuste',
+        'vendedor',
+        1,
+        plan.costo_vendedor_extra,
+        periodo.periodo_fin
+    );
+
+    RETURN NEW;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| CREATE OR REPLACE FUNCTION public.validar_sucursal_total()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    total_actual INTEGER;
+    limite_plan INTEGER;
+BEGIN
+    -- Validar suscripción activa
+    PERFORM validar_suscripcion_activa(NEW.id_empresa);
+
+    -- Contar sucursales actuales
+    SELECT COUNT(*)
+    INTO total_actual
+    FROM sucursales
+    WHERE id_empresa = NEW.id_empresa;
+
+    -- Obtener límite
+    SELECT p.limite_sucursales
+    INTO limite_plan
+    FROM suscripciones s
+    JOIN planes p ON s.id_plan = p.id
+    WHERE s.id_empresa = NEW.id_empresa
+    AND s.estado = 'activa'
+    LIMIT 1;
+
+    IF total_actual >= limite_plan THEN
+        RAISE EXCEPTION 'Límite de sucursales alcanzado.';
+    END IF;
+
+    RETURN NEW;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| CREATE OR REPLACE FUNCTION public.generar_ajuste_proporcional(p_id_empresa uuid, p_recurso text, p_costo_mensual numeric)
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    periodo_base RECORD;
+    dias_totales integer;
+    dias_restantes integer;
+    monto_proporcional numeric;
+BEGIN
+
+    -- Buscar periodo base activo actual
+    SELECT *
+    INTO periodo_base
+    FROM cuentas_matriz
+    WHERE id_empresa_matriz = p_id_empresa
+      AND tipo = 'base'
+      AND estado = 'activa'
+    ORDER BY periodo_inicio DESC
+    LIMIT 1;
+
+    IF periodo_base IS NULL THEN
+        RAISE EXCEPTION 'No existe periodo base activo';
+    END IF;
+
+    dias_totales :=
+        (periodo_base.periodo_fin - periodo_base.periodo_inicio);
+
+    dias_restantes :=
+        (periodo_base.periodo_fin - CURRENT_DATE);
+
+    IF dias_restantes <= 0 THEN
+        RETURN;
+    END IF;
+
+    monto_proporcional :=
+        (p_costo_mensual / dias_totales) * dias_restantes;
+
+    INSERT INTO cuentas_matriz (
+        id,
+        id_empresa_matriz,
+        periodo_inicio,
+        periodo_fin,
+        monto_total,
+        estado,
+        tipo,
+        recurso,
+        fecha_vencimiento
+    )
+    VALUES (
+        gen_random_uuid(),
+        p_id_empresa,
+        periodo_base.periodo_inicio,
+        periodo_base.periodo_fin,
+        monto_proporcional,
+        'activa',
+        'ajuste',
+        p_recurso,
+        periodo_base.periodo_fin
+    );
+
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| CREATE OR REPLACE FUNCTION public.cancelar_empresa_definitivamente(p_id_empresa uuid)
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    empresa_data jsonb;
+    nombre_emp text;
+    nombre_arch text;
+BEGIN
+
+    -- Obtener nombre empresa
+    SELECT nombre INTO nombre_emp
+    FROM empresas
+    WHERE id = p_id_empresa;
+
+    IF nombre_emp IS NULL THEN
+        RAISE EXCEPTION 'Empresa no encontrada';
+    END IF;
+
+    -- Construir JSON completo
+    empresa_data := jsonb_build_object(
+        'empresa', (SELECT to_jsonb(e) FROM empresas e WHERE id = p_id_empresa),
+        'suscripciones', (SELECT jsonb_agg(s) FROM suscripciones s WHERE id_empresa = p_id_empresa),
+        'cuentas_matriz', (SELECT jsonb_agg(c) FROM cuentas_matriz c WHERE id_empresa_matriz = p_id_empresa),
+        'clientes', (SELECT jsonb_agg(cl) FROM clientes cl WHERE id_empresa = p_id_empresa),
+        'productos', (SELECT jsonb_agg(p) FROM productos p WHERE id_empresa = p_id_empresa),
+        'ventas', (SELECT jsonb_agg(v) FROM ventas v WHERE id_empresa = p_id_empresa),
+        'vendedores', (SELECT jsonb_agg(vd) FROM vendedores vd WHERE id_empresa = p_id_empresa),
+        'sucursales', (SELECT jsonb_agg(su) FROM sucursales su WHERE id_empresa = p_id_empresa),
+        'usuarios_empresas', (SELECT jsonb_agg(ue) FROM usuarios_empresas ue WHERE id_empresa = p_id_empresa)
+    );
+
+    -- Generar nombre archivo identificable
+    nombre_arch := replace(nombre_emp, ' ', '_')
+                   || '_' ||
+                   to_char(now(), 'YYYY-MM-DD_HH24-MI-SS')
+                   || '.json';
+
+    -- Guardar backup
+    INSERT INTO empresas_backup (
+        id_empresa_original,
+        nombre_empresa,
+        nombre_archivo,
+        datos
+    )
+    VALUES (
+        p_id_empresa,
+        nombre_emp,
+        nombre_arch,
+        empresa_data
+    );
+
+    -- Eliminar empresa (cascade elimina todo)
+    DELETE FROM empresas
+    WHERE id = p_id_empresa;
+
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| CREATE OR REPLACE FUNCTION public.validar_vendedor_total()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    total_actual INTEGER;
+    limite_plan INTEGER;
+BEGIN
+    IF NEW.rol <> 'vendedor' THEN
+        RETURN NEW;
+    END IF;
+
+    -- Validar suscripción activa
+    PERFORM validar_suscripcion_activa(NEW.id_empresa);
+
+    -- Contar vendedores activos
+    SELECT COUNT(*)
+    INTO total_actual
+    FROM usuarios_empresas
+    WHERE id_empresa = NEW.id_empresa
+      AND rol = 'vendedor'
+      AND activo = TRUE;
+
+    -- Obtener límite
+    SELECT p.limite_vendedores
+    INTO limite_plan
+    FROM suscripciones s
+    JOIN planes p ON s.id_plan = p.id
+    WHERE s.id_empresa = NEW.id_empresa
+      AND s.estado = 'activa'
+    LIMIT 1;
+
+    IF total_actual >= limite_plan THEN
+        RAISE EXCEPTION 'Límite de vendedores alcanzado.';
+    END IF;
+
+    RETURN NEW;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| CREATE OR REPLACE FUNCTION public.agregar_recurso_extra(p_id_empresa uuid, p_tipo_recurso text)
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    plan_empresa RECORD;
+    limite_incluido integer;
+    total_actual integer;
+    extras_actuales integer;
+    autorizacion RECORD;
+BEGIN
+
+    -- 1️⃣ Obtener plan activo
+    SELECT pl.*
+    INTO plan_empresa
+    FROM suscripciones s
+    JOIN planes pl ON pl.id = s.id_plan
+    WHERE s.id_empresa = p_id_empresa
+      AND s.estado = 'activa'
+    LIMIT 1;
+
+    IF plan_empresa IS NULL THEN
+        RAISE EXCEPTION 'Empresa sin suscripción activa';
+    END IF;
+
+    -- 2️⃣ Determinar límite incluido según tipo
+    IF p_tipo_recurso = 'vendedor' THEN
+        limite_incluido := plan_empresa.limite_vendedores;
+        SELECT COUNT(*) INTO total_actual
+        FROM vendedores
+        WHERE id_empresa = p_id_empresa;
+
+    ELSIF p_tipo_recurso = 'sucursal' THEN
+        limite_incluido := plan_empresa.limite_sucursales;
+        SELECT COUNT(*) INTO total_actual
+        FROM sucursales
+        WHERE id_empresa = p_id_empresa;
+
+    ELSE
+        RAISE EXCEPTION 'Tipo de recurso inválido';
+    END IF;
+
+    extras_actuales := GREATEST(total_actual - limite_incluido, 0);
+
+    -- 3️⃣ Obtener autorización admin
+    SELECT *
+    INTO autorizacion
+    FROM autorizaciones_admin_empresa
+    WHERE id_empresa = p_id_empresa
+      AND tipo_recurso = p_tipo_recurso
+    LIMIT 1;
+
+    IF autorizacion IS NULL THEN
+        RAISE EXCEPTION 'No hay autorización admin para recurso extra';
+    END IF;
+
+    IF extras_actuales >= autorizacion.cantidad_autorizada THEN
+        RAISE EXCEPTION 'Se alcanzó el límite autorizado por admin';
+    END IF;
+
+    -- 4️⃣ Registrar recurso activo
+    INSERT INTO recursos_activos_empresa (
+        id_empresa,
+        tipo_recurso,
+        fecha_inicio,
+        costo_mensual
+    )
+    VALUES (
+        p_id_empresa,
+        p_tipo_recurso,
+        CURRENT_DATE,
+        autorizacion.costo_mensual
+    );
+
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| CREATE OR REPLACE FUNCTION public.actualizar_suscripciones_vencidas()
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    empresa_vencida UUID;
+BEGIN
+    -- Recorrer todas las suscripciones que ya vencieron
+    FOR empresa_vencida IN
+        SELECT id_empresa
+        FROM suscripciones
+        WHERE estado = 'activa'
+          AND fecha_vencimiento < NOW()
+    LOOP
+
+        -- 1️⃣ Marcar suscripción como vencida
+        UPDATE suscripciones
+        SET estado = 'vencida'
+        WHERE id_empresa = empresa_vencida
+          AND estado = 'activa';
+
+        -- 2️⃣ Suspender empresa principal
+        UPDATE empresas
+        SET estado = 'suspendida'
+        WHERE id = empresa_vencida;
+
+        -- 3️⃣ Suspender franquicias hijas
+        UPDATE empresas
+        SET estado = 'suspendida'
+        WHERE id_empresa_padre = empresa_vencida;
+
+    END LOOP;
+
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| CREATE OR REPLACE FUNCTION public.motor_financiero_saas(fecha_referencia date DEFAULT CURRENT_DATE)
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    empresa RECORD;
+    suscripcion RECORD;
+    ultimo_periodo RECORD;
+    nuevo_inicio date;
+    nuevo_fin date;
+    precio_base numeric;
+
+    periodo_base RECORD;
+    recurso RECORD;
+
+    inicio_real date;
+    fin_real date;
+    dias_totales integer;
+    dias_aplicables integer;
+    monto_real numeric;
+
+BEGIN
+
+FOR empresa IN
+    SELECT * FROM empresas
+    WHERE estado IN ('activa','suspendida')
+LOOP
+
+    -- FASE 1: GENERAR PERIODOS BASE
+
+    SELECT s.*, p.precio_mensual, p.precio_anual
+    INTO suscripcion
+    FROM suscripciones s
+    JOIN planes p ON p.id = s.id_plan
+    WHERE s.id_empresa = empresa.id
+      AND s.estado = 'activa'
+    LIMIT 1;
+
+    IF suscripcion IS NULL THEN
+        CONTINUE;
+    END IF;
+
+    IF suscripcion.ciclo = 'mensual' THEN
+        precio_base := suscripcion.precio_mensual;
+    ELSE
+        precio_base := suscripcion.precio_anual;
+    END IF;
+
+    SELECT *
+    INTO ultimo_periodo
+    FROM cuentas_matriz
+    WHERE id_empresa_matriz = empresa.id
+      AND tipo = 'base'
+    ORDER BY periodo_fin DESC
+    LIMIT 1;
+
+    IF ultimo_periodo IS NULL THEN
+
+        nuevo_inicio := suscripcion.fecha_inicio;
+        nuevo_fin := nuevo_inicio + INTERVAL '1 month';
+
+        INSERT INTO cuentas_matriz (
+            id,
+            id_empresa_matriz,
+            periodo_inicio,
+            periodo_fin,
+            monto_total,
+            estado,
+            tipo,
+            fecha_vencimiento
+        )
+        VALUES (
+            gen_random_uuid(),
+            empresa.id,
+            nuevo_inicio,
+            nuevo_fin,
+            precio_base,
+            'activa',
+            'base',
+            nuevo_fin
+        );
+
+    ELSE
+
+        WHILE ultimo_periodo.periodo_fin < fecha_referencia LOOP
+
+            nuevo_inicio := ultimo_periodo.periodo_fin;
+            nuevo_fin := nuevo_inicio + INTERVAL '1 month';
+
+            INSERT INTO cuentas_matriz (
+                id,
+                id_empresa_matriz,
+                periodo_inicio,
+                periodo_fin,
+                monto_total,
+                estado,
+                tipo,
+                fecha_vencimiento
+            )
+            VALUES (
+                gen_random_uuid(),
+                empresa.id,
+                nuevo_inicio,
+                nuevo_fin,
+                precio_base,
+                'activa',
+                'base',
+                nuevo_fin
+            );
+
+            ultimo_periodo.periodo_inicio := nuevo_inicio;
+            ultimo_periodo.periodo_fin := nuevo_fin;
+
+        END LOOP;
+
+    END IF;
+
+    -- FASE 2: MARCAR VENCIDAS Y SUSPENDER
+
+    UPDATE cuentas_matriz
+    SET estado = 'vencida'
+    WHERE id_empresa_matriz = empresa.id
+      AND tipo = 'base'
+      AND estado = 'activa'
+      AND fecha_vencimiento < fecha_referencia;
+
+    IF EXISTS (
+        SELECT 1 FROM cuentas_matriz
+        WHERE id_empresa_matriz = empresa.id
+          AND tipo = 'base'
+          AND estado = 'vencida'
+    ) THEN
+        UPDATE empresas SET estado = 'suspendida' WHERE id = empresa.id;
+    ELSE
+        UPDATE empresas SET estado = 'activa' WHERE id = empresa.id;
+    END IF;
+
+    -- FASE 3: GENERAR AJUSTES POSITIVOS SOLAMENTE
+
+    FOR periodo_base IN
+        SELECT *
+        FROM cuentas_matriz
+        WHERE id_empresa_matriz = empresa.id
+          AND tipo = 'base'
+        ORDER BY periodo_inicio
+    LOOP
+
+        FOR recurso IN
+            SELECT *
+            FROM recursos_activos_empresa
+            WHERE id_empresa = empresa.id
+        LOOP
+
+            IF recurso.fecha_inicio <= periodo_base.periodo_fin
+               AND (recurso.fecha_fin IS NULL OR recurso.fecha_fin >= periodo_base.periodo_inicio)
+            THEN
+
+                inicio_real := GREATEST(periodo_base.periodo_inicio, recurso.fecha_inicio);
+                fin_real := LEAST(periodo_base.periodo_fin, COALESCE(recurso.fecha_fin, periodo_base.periodo_fin));
+
+                dias_totales := (periodo_base.periodo_fin - periodo_base.periodo_inicio);
+                dias_aplicables := (fin_real - inicio_real);
+
+                IF dias_aplicables > 0 THEN
+
+                    monto_real := (recurso.costo_mensual / dias_totales) * dias_aplicables;
+
+                    IF NOT EXISTS (
+                        SELECT 1 FROM cuentas_matriz
+                        WHERE id_empresa_matriz = empresa.id
+                          AND tipo = 'ajuste'
+                          AND id_recurso = recurso.id
+                          AND periodo_inicio = periodo_base.periodo_inicio
+                    ) THEN
+
+                        INSERT INTO cuentas_matriz (
+                            id,
+                            id_empresa_matriz,
+                            periodo_inicio,
+                            periodo_fin,
+                            monto_total,
+                            estado,
+                            tipo,
+                            recurso,
+                            id_recurso,
+                            fecha_vencimiento
+                        )
+                        VALUES (
+                            gen_random_uuid(),
+                            empresa.id,
+                            periodo_base.periodo_inicio,
+                            periodo_base.periodo_fin,
+                            monto_real,
+                            'activa',
+                            'ajuste',
+                            recurso.tipo_recurso,
+                            recurso.id,
+                            periodo_base.periodo_fin
+                        );
+
+                    END IF;
+
+                END IF;
+
+            END IF;
+
+        END LOOP;
+
+    END LOOP;
+
+END LOOP;
+
+END;
+$function$
+ |
+| CREATE OR REPLACE FUNCTION public.reactivar_empresa(p_id_empresa uuid, p_nueva_fecha timestamp without time zone)
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+
+    -- 1️⃣ Reactivar suscripción
+    UPDATE suscripciones
+    SET estado = 'activa',
+        fecha_inicio = NOW(),
+        fecha_vencimiento = p_nueva_fecha
+    WHERE id_empresa = p_id_empresa;
+
+    -- 2️⃣ Reactivar empresa matriz
+    UPDATE empresas
+    SET estado = 'activa'
+    WHERE id = p_id_empresa;
+
+    -- 3️⃣ Reactivar franquicias hijas
+    UPDATE empresas
+    SET estado = 'activa'
+    WHERE id_empresa_padre = p_id_empresa;
+
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| CREATE OR REPLACE FUNCTION public.reactivar_empresa(p_id_empresa uuid)
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    fecha_fin DATE;
+    cuenta_id UUID;
+BEGIN
+
+    -- 1️⃣ Obtener cuenta pagada más reciente
+    SELECT id, periodo_fin
+    INTO cuenta_id, fecha_fin
+    FROM cuentas_matriz
+    WHERE id_empresa_matriz = p_id_empresa
+      AND estado = 'pagado'
+    ORDER BY periodo_fin DESC
+    LIMIT 1;
+
+    IF cuenta_id IS NULL THEN
+        RAISE EXCEPTION 'No existe cuenta pagada para reactivar esta empresa.';
+    END IF;
+
+    -- 2️⃣ Reactivar suscripción
+    UPDATE suscripciones
+    SET estado = 'activa',
+        fecha_inicio = NOW(),
+        fecha_vencimiento = fecha_fin
+    WHERE id_empresa = p_id_empresa;
+
+    -- 3️⃣ Reactivar empresa matriz
+    UPDATE empresas
+    SET estado = 'activa'
+    WHERE id = p_id_empresa;
+
+    -- 4️⃣ Reactivar franquicias hijas
+    UPDATE empresas
+    SET estado = 'activa'
+    WHERE id_empresa_padre = p_id_empresa;
+
+    -- 5️⃣ Marcar cuenta como procesada
+    UPDATE cuentas_matriz
+    SET estado = 'procesado'
+    WHERE id = cuenta_id;
+
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| CREATE OR REPLACE FUNCTION public.notificar_pago_cuenta()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    IF NEW.estado = 'pagado' AND OLD.estado <> 'pagado' THEN
+        -- Aquí solo marcamos evento lógico
+        INSERT INTO notificaciones_pendientes (
+            id_empresa,
+            tipo,
+            fecha_creacion
+        )
+        VALUES (
+            NEW.id_empresa_matriz,
+            'emitir_factura',
+            NOW()
+        );
+    END IF;
+
+    RETURN NEW;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| CREATE OR REPLACE FUNCTION public.detectar_suscripciones_por_vencer()
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    empresa_id UUID;
+BEGIN
+    FOR empresa_id IN
+        SELECT id_empresa
+        FROM suscripciones
+        WHERE estado = 'activa'
+          AND fecha_vencimiento <= NOW() + INTERVAL '3 days'
+          AND fecha_vencimiento > NOW()
+          AND aviso_previo_enviado = FALSE
+    LOOP
+
+        -- Insertar notificación
+        INSERT INTO notificaciones_pendientes (
+            id_empresa,
+            tipo,
+            fecha_creacion
+        )
+        VALUES (
+            empresa_id,
+            'suscripcion_por_vencer',
+            NOW()
+        );
+
+        -- Marcar que ya se notificó
+        UPDATE suscripciones
+        SET aviso_previo_enviado = TRUE
+        WHERE id_empresa = empresa_id
+          AND estado = 'activa';
+
+    END LOOP;
+
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| CREATE OR REPLACE FUNCTION public.generar_cuentas_vencidas()
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    ultima_cuenta RECORD;
+    duracion INTEGER;
+    es_trial BOOLEAN;
+    precio_base NUMERIC;
+    precio_extra NUMERIC;
+    max_incluidas INTEGER;
+    total_empresas INTEGER;
+    monto_calculado NUMERIC;
+BEGIN
+
+    FOR ultima_cuenta IN
+        SELECT cm.*
+        FROM cuentas_matriz cm
+        WHERE cm.periodo_fin < NOW()
+        AND NOT EXISTS (
+            SELECT 1 FROM cuentas_matriz cm2
+            WHERE cm2.id_empresa_matriz = cm.id_empresa_matriz
+            AND cm2.periodo_inicio > cm.periodo_fin
+        )
+    LOOP
+
+        SELECT p.duracion_dias,
+               p.es_trial,
+               p.precio_base,
+               p.precio_empresa_extra,
+               p.max_empresas_incluidas
+        INTO duracion,
+             es_trial,
+             precio_base,
+             precio_extra,
+             max_incluidas
+        FROM suscripciones s
+        JOIN planes p ON p.id = s.id_plan
+        WHERE s.id_empresa = ultima_cuenta.id_empresa_matriz
+        LIMIT 1;
+
+        IF es_trial THEN
+            CONTINUE;
+        END IF;
+
+        SELECT COUNT(*)
+        INTO total_empresas
+        FROM empresas
+        WHERE id_empresa_matriz = ultima_cuenta.id_empresa_matriz
+           OR id = ultima_cuenta.id_empresa_matriz;
+
+        IF total_empresas > max_incluidas THEN
+            monto_calculado :=
+                precio_base +
+                ((total_empresas - max_incluidas) * precio_extra);
+        ELSE
+            monto_calculado := precio_base;
+        END IF;
+
+        INSERT INTO cuentas_matriz (
+            id_empresa_matriz,
+            periodo_inicio,
+            periodo_fin,
+            total_empresas,
+            monto_total,
+            estado,
+            fecha_vencimiento,
+            fecha_creacion
+        )
+        VALUES (
+            ultima_cuenta.id_empresa_matriz,
+            ultima_cuenta.periodo_fin,
+            ultima_cuenta.periodo_fin + (duracion || ' days')::INTERVAL,
+            total_empresas,
+            monto_calculado,
+            'pendiente',
+            ultima_cuenta.periodo_fin + (duracion || ' days')::INTERVAL,
+            NOW()
+        );
+
+    END LOOP;
+
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| CREATE OR REPLACE FUNCTION public.bloquear_si_suspendida()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM empresas
+        WHERE id = NEW.id_empresa
+        AND estado = 'suspendida'
+    ) THEN
+        RAISE EXCEPTION 'Empresa suspendida. No puede realizar operaciones.';
+    END IF;
+
+    RETURN NEW;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| CREATE OR REPLACE FUNCTION public.detectar_cuentas_por_vencer()
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+
+    INSERT INTO notificaciones (id_empresa, mensaje, fecha_creacion)
+    SELECT id_empresa_matriz,
+           'Tu suscripción vence en menos de 3 días',
+           NOW()
+    FROM cuentas_matriz
+    WHERE estado = 'pendiente'
+      AND fecha_vencimiento <= NOW() + INTERVAL '3 days'
+      AND fecha_vencimiento > NOW();
+
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| CREATE OR REPLACE FUNCTION public.top_productos_empresa(empresa_id uuid)
+ RETURNS TABLE(nombre text, total_vendido numeric)
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    RETURN QUERY
+    SELECT p.nombre, SUM(d.subtotal)
+    FROM detalle_ventas d
+    JOIN ventas v ON d.id_venta = v.id
+    JOIN productos p ON d.id_producto = p.id
+    WHERE v.id_empresa = empresa_id
+    GROUP BY p.nombre
+    ORDER BY SUM(d.subtotal) DESC
+    LIMIT 5;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| CREATE OR REPLACE FUNCTION public.ventas_por_vendedor(empresa_id uuid)
+ RETURNS TABLE(vendedor text, total numeric)
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    RETURN QUERY
+    SELECT vd.nombre, SUM(v.total)
+    FROM ventas v
+    JOIN vendedores vd ON v.id_vendedor = vd.id
+    WHERE v.id_empresa = empresa_id
+    GROUP BY vd.nombre
+    ORDER BY SUM(v.total) DESC;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| CREATE OR REPLACE FUNCTION public.cerrar_avisos_al_pagar()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+
+    IF NEW.estado = 'pagada' THEN
+        UPDATE notificaciones_pendientes
+        SET atendido = true
+        WHERE id_empresa = NEW.id_empresa_matriz
+          AND tipo = 'aviso_vencimiento'
+          AND atendido = false;
+    END IF;
+
+    RETURN NEW;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| CREATE OR REPLACE FUNCTION public.margen_bruto_empresa(empresa_id uuid)
+ RETURNS TABLE(margen numeric)
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    RETURN QUERY
+    SELECT SUM((d.precio_unitario - COALESCE(p.costo,0)) * d.cantidad)
+    FROM detalle_ventas d
+    JOIN ventas v ON d.id_venta = v.id
+    JOIN productos p ON d.id_producto = p.id
+    WHERE v.id_empresa = empresa_id;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| CREATE OR REPLACE FUNCTION public.calcular_factor_proporcional(fecha_inicio date, fecha_fin date, fecha_actual date)
+ RETURNS numeric
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    dias_totales numeric;
+    dias_restantes numeric;
+BEGIN
+    dias_totales := fecha_fin - fecha_inicio;
+    dias_restantes := fecha_fin - fecha_actual;
+
+    IF dias_restantes < 0 THEN
+        RETURN 0;
+    END IF;
+
+    RETURN dias_restantes / dias_totales;
+END;
+$function$
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | pg_get_functiondef                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| CREATE OR REPLACE FUNCTION public.motor_financiero_saas(fecha_referencia date DEFAULT CURRENT_DATE)
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+    empresa RECORD;
+    suscripcion RECORD;
+    ultimo_periodo RECORD;
+    nuevo_inicio date;
+    nuevo_fin date;
+    precio_base numeric;
+
+    periodo_base RECORD;
+    recurso RECORD;
+
+    inicio_real date;
+    fin_real date;
+    dias_totales integer;
+    dias_aplicables integer;
+    monto_real numeric;
+
+BEGIN
+
+FOR empresa IN
+    SELECT * FROM empresas
+    WHERE estado IN ('activa','suspendida')
+LOOP
+
+    -- FASE 1: GENERAR PERIODOS BASE
+
+    SELECT s.*, p.precio_mensual, p.precio_anual
+    INTO suscripcion
+    FROM suscripciones s
+    JOIN planes p ON p.id = s.id_plan
+    WHERE s.id_empresa = empresa.id
+      AND s.estado = 'activa'
+    LIMIT 1;
+
+    IF suscripcion IS NULL THEN
+        CONTINUE;
+    END IF;
+
+    IF suscripcion.ciclo = 'mensual' THEN
+        precio_base := suscripcion.precio_mensual;
+    ELSE
+        precio_base := suscripcion.precio_anual;
+    END IF;
+
+    SELECT *
+    INTO ultimo_periodo
+    FROM cuentas_matriz
+    WHERE id_empresa_matriz = empresa.id
+      AND tipo = 'base'
+    ORDER BY periodo_fin DESC
+    LIMIT 1;
+
+    IF ultimo_periodo IS NULL THEN
+
+        nuevo_inicio := suscripcion.fecha_inicio;
+        nuevo_fin := nuevo_inicio + INTERVAL '1 month';
+
+        INSERT INTO cuentas_matriz (
+            id,
+            id_empresa_matriz,
+            periodo_inicio,
+            periodo_fin,
+            monto_total,
+            estado,
+            tipo,
+            fecha_vencimiento
+        )
+        VALUES (
+            gen_random_uuid(),
+            empresa.id,
+            nuevo_inicio,
+            nuevo_fin,
+            precio_base,
+            'activa',
+            'base',
+            nuevo_fin
+        );
+
+    ELSE
+
+        WHILE ultimo_periodo.periodo_fin < fecha_referencia LOOP
+
+            nuevo_inicio := ultimo_periodo.periodo_fin;
+            nuevo_fin := nuevo_inicio + INTERVAL '1 month';
+
+            INSERT INTO cuentas_matriz (
+                id,
+                id_empresa_matriz,
+                periodo_inicio,
+                periodo_fin,
+                monto_total,
+                estado,
+                tipo,
+                fecha_vencimiento
+            )
+            VALUES (
+                gen_random_uuid(),
+                empresa.id,
+                nuevo_inicio,
+                nuevo_fin,
+                precio_base,
+                'activa',
+                'base',
+                nuevo_fin
+            );
+
+            ultimo_periodo.periodo_inicio := nuevo_inicio;
+            ultimo_periodo.periodo_fin := nuevo_fin;
+
+        END LOOP;
+
+    END IF;
+
+    -- FASE 2: MARCAR VENCIDAS Y SUSPENDER
+
+    UPDATE cuentas_matriz
+    SET estado = 'vencida'
+    WHERE id_empresa_matriz = empresa.id
+      AND tipo = 'base'
+      AND estado = 'activa'
+      AND fecha_vencimiento < fecha_referencia;
+
+    IF EXISTS (
+        SELECT 1 FROM cuentas_matriz
+        WHERE id_empresa_matriz = empresa.id
+          AND tipo = 'base'
+          AND estado = 'vencida'
+    ) THEN
+        UPDATE empresas SET estado = 'suspendida' WHERE id = empresa.id;
+    ELSE
+        UPDATE empresas SET estado = 'activa' WHERE id = empresa.id;
+    END IF;
+
+    -- FASE 3: GENERAR AJUSTES POSITIVOS SOLAMENTE
+
+    FOR periodo_base IN
+        SELECT *
+        FROM cuentas_matriz
+        WHERE id_empresa_matriz = empresa.id
+          AND tipo = 'base'
+        ORDER BY periodo_inicio
+    LOOP
+
+        FOR recurso IN
+            SELECT *
+            FROM recursos_activos_empresa
+            WHERE id_empresa = empresa.id
+        LOOP
+
+            IF recurso.fecha_inicio <= periodo_base.periodo_fin
+               AND (recurso.fecha_fin IS NULL OR recurso.fecha_fin >= periodo_base.periodo_inicio)
+            THEN
+
+                inicio_real := GREATEST(periodo_base.periodo_inicio, recurso.fecha_inicio);
+                fin_real := LEAST(periodo_base.periodo_fin, COALESCE(recurso.fecha_fin, periodo_base.periodo_fin));
+
+                dias_totales := (periodo_base.periodo_fin - periodo_base.periodo_inicio);
+                dias_aplicables := (fin_real - inicio_real);
+
+                IF dias_aplicables > 0 THEN
+
+                    monto_real := (recurso.costo_mensual / dias_totales) * dias_aplicables;
+
+                    IF NOT EXISTS (
+                        SELECT 1 FROM cuentas_matriz
+                        WHERE id_empresa_matriz = empresa.id
+                          AND tipo = 'ajuste'
+                          AND id_recurso = recurso.id
+                          AND periodo_inicio = periodo_base.periodo_inicio
+                    ) THEN
+
+                        INSERT INTO cuentas_matriz (
+                            id,
+                            id_empresa_matriz,
+                            periodo_inicio,
+                            periodo_fin,
+                            monto_total,
+                            estado,
+                            tipo,
+                            recurso,
+                            id_recurso,
+                            fecha_vencimiento
+                        )
+                        VALUES (
+                            gen_random_uuid(),
+                            empresa.id,
+                            periodo_base.periodo_inicio,
+                            periodo_base.periodo_fin,
+                            monto_real,
+                            'activa',
+                            'ajuste',
+                            recurso.tipo_recurso,
+                            recurso.id,
+                            periodo_base.periodo_fin
+                        );
+
+                    END IF;
+
+                END IF;
+
+            END IF;
+
+        END LOOP;
+
+    END LOOP;
+
+END LOOP;
+
+END;
+$function$
+ |
