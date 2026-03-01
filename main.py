@@ -1,11 +1,12 @@
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 import bcrypt
+import jwt
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import supabase
 from auth import crear_access_token, crear_refresh_token, verificar_token
-from dependencies import get_current_user
+from dependencies import get_current_user, get_user_solo_token
 
 from routes.usuarios import router as usuarios_router
 from routes.clientes import router as clientes_router
@@ -14,7 +15,25 @@ from routes.ventas import router as ventas_router
 from routes.caja import router as caja_router
 from routes.admin import router as admin_router
 from routes.dashboard import router as dashboard_router
+from routes import admin_saas
+from routes import empresas
+from routes import pagos
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
+import os
+from dotenv import load_dotenv
+
+
+
+
+
+
+security = HTTPBearer()
+
+load_dotenv()
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = os.getenv("ALGORITHM")
 
 app = FastAPI()
 
@@ -47,6 +66,14 @@ app.include_router(ventas_router, dependencies=[Depends(get_current_user)])
 app.include_router(caja_router, dependencies=[Depends(get_current_user)])
 app.include_router(admin_router, dependencies=[Depends(get_current_user)])
 app.include_router(dashboard_router, dependencies=[Depends(get_current_user)])
+app.include_router(pagos.router)
+
+
+# Admin SaaS protegido (solo admin_master pasa por dependency)
+app.include_router(admin_saas.router, dependencies=[Depends(get_current_user)])
+
+# Empresas protegido
+app.include_router(empresas.router, dependencies=[Depends(get_current_user)])
 
 
 # =================================
@@ -80,7 +107,7 @@ def home():
 # =================================
 
 @app.get("/me")
-def validar_usuario(usuario = Depends(get_current_user)):
+def validar_usuario(usuario=Depends(get_current_user)):
     return {"usuario": usuario}
 
 
@@ -110,7 +137,26 @@ def login(datos: LoginData):
     ):
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
 
+    # 🔥 TOKEN CORRECTO CON id_usuario Y nivel_global
+    access_token = crear_access_token({
+        "id_usuario": usuario["id"],
+        "nivel_global": usuario.get("nivel_global")
+    })
+
+    refresh_token = crear_refresh_token({
+        "id_usuario": usuario["id"]
+    })
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
+    
+    # =========================
     # ADMIN MASTER
+    # =========================
+
     if usuario.get("nivel_global") == "admin_master":
 
         access_token = crear_access_token({
@@ -128,20 +174,24 @@ def login(datos: LoginData):
             "token_type": "bearer"
         }
 
-    # EMPRESAS
+    # =========================
+    # USUARIO NORMAL
+    # =========================
+
     empresas_resp = supabase.table("usuarios_empresas") \
         .select("id_empresa, rol") \
         .eq("id_usuario", usuario["id"]) \
         .eq("activo", True) \
         .execute()
 
-    empresas = empresas_resp.data
+    empresas_usuario = empresas_resp.data
 
-    if not empresas:
+    if not empresas_usuario:
         return {"status": "crear_empresa"}
 
-    if len(empresas) == 1:
-        empresa = empresas[0]
+    if len(empresas_usuario) == 1:
+
+        empresa = empresas_usuario[0]
 
         access_token = crear_access_token({
             "id_usuario": usuario["id"],
@@ -162,7 +212,7 @@ def login(datos: LoginData):
 
     return {
         "status": "seleccionar_empresa",
-        "empresas": empresas
+        "empresas": empresas_usuario
     }
 
 
@@ -171,7 +221,7 @@ def login(datos: LoginData):
 # =================================
 
 @app.post("/seleccionar-empresa")
-def seleccionar_empresa(datos: SeleccionarEmpresa, usuario = Depends(get_current_user)):
+def seleccionar_empresa(datos: SeleccionarEmpresa, usuario=Depends(get_user_solo_token)):
 
     resp = supabase.table("usuarios_empresas") \
         .select("rol") \
@@ -223,3 +273,35 @@ def refresh_token(data: RefreshData):
         "access_token": nuevo_access,
         "token_type": "bearer"
     }
+    
+
+# =================================
+# CAMBIAR PASSWORD
+# =================================
+class CambiarPasswordData(BaseModel):
+    password_actual: str
+    password_nueva: str
+
+
+@app.post("/cambiar-password")
+def cambiar_password(
+    datos: CambiarPasswordData,
+    usuario_actual = Depends(obtener_usuario_actual)
+):
+    if not bcrypt.checkpw(
+        datos.password_actual.encode("utf-8"),
+        usuario_actual["password_hash"].encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Contraseña actual incorrecta")
+
+    nuevo_hash = bcrypt.hashpw(
+        datos.password_nueva.encode("utf-8"),
+        bcrypt.gensalt()
+    ).decode("utf-8")
+
+    supabase.table("usuarios") \
+        .update({"password_hash": nuevo_hash}) \
+        .eq("id", usuario_actual["id"]) \
+        .execute()
+
+    return {"mensaje": "Contraseña actualizada correctamente"}

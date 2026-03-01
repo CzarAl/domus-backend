@@ -189,3 +189,33 @@ def saas_metrics(usuario=Depends(get_current_user)):
             "ltv_estimado": round(ltv, 2)
         }
     }
+
+# =====================================================
+# DASHBOARD FINANCIERO EJECUTIVO
+# =====================================================
+
+@router.get("/dashboard")
+def dashboard_financiero(usuario=Depends(get_current_user)):
+
+    validar_admin(usuario)
+
+    response = supabase.table("dashboard_admin_financiero") \
+        .select("*") \
+        .execute()
+
+    if not response.data:
+        return {}
+
+    return response.data[0]
+
+@router.get("/crecimiento-mensual")
+def crecimiento_mensual(usuario=Depends(get_current_user)):
+
+    validar_admin(usuario)
+
+    response = supabase.table("dashboard_crecimiento_mensual") \
+        .select("*") \
+        .order("mes") \
+        .execute()
+
+    return response.data

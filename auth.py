@@ -2,6 +2,8 @@ import os
 import jwt
 from datetime import datetime, timedelta
 from fastapi import HTTPException
+from dotenv import load_dotenv
+load_dotenv()
 
 
 # ======================================
@@ -9,7 +11,7 @@ from fastapi import HTTPException
 # ======================================
 
 SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = "HS256"
+ALGORITHM = os.getenv("ALGORITHM")
 
 ACCESS_TOKEN_EXPIRE_HOURS = int(os.getenv("TOKEN_EXPIRE_HOURS", 8))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", 7))
