@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database import supabase
 from auth import crear_access_token, crear_refresh_token, verificar_token
-from dependencies import get_current_user, get_user_solo_token
+from dependencies import get_current_user
 
 from routes.usuarios import router as usuarios_router
 from routes.clientes import router as clientes_router
@@ -215,35 +215,41 @@ def login(datos: LoginData):
         "empresas": empresas_usuario
     }
 
-
 # =================================
 # SELECCIONAR EMPRESA
 # =================================
 
 @app.post("/seleccionar-empresa")
-def seleccionar_empresa(datos: SeleccionarEmpresa, usuario=Depends(get_user_solo_token)):
+def seleccionar_empresa(
+    datos: SeleccionarEmpresa,
+    usuario: dict = Depends(get_current_user)
+):
 
+    # Verificar que el usuario tenga acceso a esa empresa
     resp = supabase.table("usuarios_empresas") \
         .select("rol") \
-        .eq("id_usuario", usuario["id_usuario"]) \
+        .eq("id_usuario", usuario["id"]) \
         .eq("id_empresa", datos.id_empresa) \
         .eq("activo", True) \
         .execute()
 
     if not resp.data:
-        raise HTTPException(status_code=403, detail="No tienes acceso a esta empresa")
+        raise HTTPException(
+            status_code=403,
+            detail="No tienes acceso a esta empresa"
+        )
 
     rol = resp.data[0]["rol"]
 
     access_token = crear_access_token({
-        "id_usuario": usuario["id_usuario"],
+        "id_usuario": usuario["id"],
         "id_empresa": datos.id_empresa,
         "rol": rol,
         "nivel_global": usuario.get("nivel_global")
     })
 
     refresh_token = crear_refresh_token({
-        "id_usuario": usuario["id_usuario"]
+        "id_usuario": usuario["id"]
     })
 
     return {
@@ -251,7 +257,6 @@ def seleccionar_empresa(datos: SeleccionarEmpresa, usuario=Depends(get_user_solo
         "refresh_token": refresh_token,
         "token_type": "bearer"
     }
-
 
 # =================================
 # REFRESH
@@ -286,19 +291,25 @@ class CambiarPasswordData(BaseModel):
 @app.post("/cambiar-password")
 def cambiar_password(
     datos: CambiarPasswordData,
-    usuario_actual = Depends(obtener_usuario_actual)
+    usuario_actual: dict = Depends(get_current_user)
 ):
+    # Verificar contraseña actual
     if not bcrypt.checkpw(
         datos.password_actual.encode("utf-8"),
         usuario_actual["password_hash"].encode("utf-8")
     ):
-        raise HTTPException(status_code=401, detail="Contraseña actual incorrecta")
+        raise HTTPException(
+            status_code=401,
+            detail="Contraseña actual incorrecta"
+        )
 
+    # Hashear nueva contraseña
     nuevo_hash = bcrypt.hashpw(
         datos.password_nueva.encode("utf-8"),
         bcrypt.gensalt()
     ).decode("utf-8")
 
+    # Actualizar en base de datos
     supabase.table("usuarios") \
         .update({"password_hash": nuevo_hash}) \
         .eq("id", usuario_actual["id"]) \
