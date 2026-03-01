@@ -120,42 +120,52 @@ def validar_usuario(usuario=Depends(get_current_user)):
 @app.post("/login")
 def login(datos: LoginData):
 
-    respuesta = supabase.table("usuarios") \
-        .select("*") \
-        .eq("email", datos.correo) \
-        .execute()
+    try:
+        respuesta = supabase.table("usuarios") \
+            .select("*") \
+            .eq("email", datos.correo) \
+            .execute()
 
-    if not respuesta.data:
-        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+        if not respuesta.data:
+            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
 
-    usuario = respuesta.data[0]
+        usuario = respuesta.data[0]
 
-    if not usuario.get("activo"):
-        raise HTTPException(status_code=403, detail="Usuario inactivo")
+        if not usuario.get("activo"):
+            raise HTTPException(status_code=403, detail="Usuario inactivo")
 
-    if not bcrypt.checkpw(
-        datos.contrasena.encode("utf-8"),
-        usuario["password_hash"].encode("utf-8")
-    ):
-        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-    
-    supabase.rpc("motor_financiero_saas").execute()
+        if not bcrypt.checkpw(
+            datos.contrasena.encode("utf-8"),
+            usuario["password_hash"].encode("utf-8")
+        ):
+            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
 
-    # 🔥 TOKEN CORRECTO CON id_usuario Y nivel_global
-    access_token = crear_access_token({
-        "id_usuario": usuario["id"],
-        "nivel_global": usuario.get("nivel_global")
-    })
+        # 🔥 Ejecutar motor financiero (no debe romper login si falla)
+        try:
+            supabase.rpc("motor_financiero_saas", {}).execute()
+        except Exception:
+            pass
 
-    refresh_token = crear_refresh_token({
-        "id_usuario": usuario["id"]
-    })
+        # 🔥 Crear tokens
+        access_token = crear_access_token({
+            "id_usuario": usuario["id"],
+            "nivel_global": usuario.get("nivel_global")
+        })
 
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer"
-    }
+        refresh_token = crear_refresh_token({
+            "id_usuario": usuario["id"]
+        })
+
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     
     # =========================
     # ADMIN MASTER
