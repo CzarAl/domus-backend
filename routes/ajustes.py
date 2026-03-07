@@ -6,6 +6,9 @@ from dateutil import parser
 
 router = APIRouter(prefix="/ajustes", tags=["Ajustes SaaS"])
 
+ESTADO_VENCIDA = "vencida"
+ESTADOS_VENCIDA_ALIAS = [ESTADO_VENCIDA, "vencido"]
+
 
 def validar_empresa_activa(id_empresa):
 
@@ -20,7 +23,7 @@ def validar_empresa_activa(id_empresa):
     vencidas = supabase.table("cuentas_matriz") \
         .select("id") \
         .eq("id_empresa_matriz", id_empresa) \
-        .eq("estado", "vencida") \
+        .in_("estado", ESTADOS_VENCIDA_ALIAS) \
         .execute().data
 
     if vencidas:

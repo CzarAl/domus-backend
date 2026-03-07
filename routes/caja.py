@@ -8,43 +8,33 @@ import uuid
 router = APIRouter(prefix="/caja", tags=["Caja"])
 
 
+# ==============================
+# MODELOS
+# ==============================
+
 class AperturaCaja(BaseModel):
     monto_inicial: float
-    id_sucursal: str | None = None
+    id_sucursal: str
 
 
 class CierreCaja(BaseModel):
     monto_final: float
 
 
-def resolver_sucursal(usuario, id_sucursal_frontend=None):
-
-    nivel = usuario.get("nivel_global")
-    id_sucursal_usuario = usuario.get("id_sucursal")
-
-    if nivel in ["admin_master", "usuario"]:
-        if not id_sucursal_frontend:
-            raise HTTPException(400, "Debe especificar sucursal")
-        return id_sucursal_frontend
-
-    if not id_sucursal_usuario:
-        raise HTTPException(403, "Vendedor sin sucursal")
-
-    return id_sucursal_usuario
-
+# ==============================
+# ABRIR CAJA
+# ==============================
 
 @router.post("/abrir")
 def abrir_caja(datos: AperturaCaja, usuario=Depends(get_current_user)):
 
-    id_empresa = usuario.get("id_empresa")
-    id_usuario = usuario.get("id_usuario")
-
-    id_sucursal = resolver_sucursal(usuario, datos.id_sucursal)
+    id_empresa = usuario["id_raiz"]
+    id_usuario = usuario["id_usuario"]
 
     existente = supabase.table("sesiones_caja") \
         .select("*") \
         .eq("id_empresa", id_empresa) \
-        .eq("id_sucursal", id_sucursal) \
+        .eq("id_sucursal", datos.id_sucursal) \
         .eq("abierta", True) \
         .execute()
 
@@ -54,11 +44,36 @@ def abrir_caja(datos: AperturaCaja, usuario=Depends(get_current_user)):
     supabase.table("sesiones_caja").insert({
         "id": str(uuid.uuid4()),
         "id_empresa": id_empresa,
-        "id_sucursal": id_sucursal,
+        "id_sucursal": datos.id_sucursal,
         "id_usuario_apertura": id_usuario,
         "monto_inicial": datos.monto_inicial,
-        "fecha_apertura": datetime.utcnow(),
+        "fecha_apertura": datetime.utcnow().isoformat(),
         "abierta": True
     }).execute()
 
     return {"mensaje": "Caja abierta"}
+
+
+# ==============================
+# CERRAR CAJA
+# ==============================
+
+@router.post("/cerrar/{id_sesion}")
+def cerrar_caja(id_sesion: str, datos: CierreCaja, usuario=Depends(get_current_user)):
+
+    id_empresa = usuario["id_raiz"]
+
+    respuesta = supabase.table("sesiones_caja") \
+        .update({
+            "monto_final": datos.monto_final,
+            "fecha_cierre": datetime.utcnow().isoformat(),
+            "abierta": False
+        }) \
+        .eq("id", id_sesion) \
+        .eq("id_empresa", id_empresa) \
+        .execute()
+
+    if not respuesta.data:
+        raise HTTPException(404, "Sesión no encontrada")
+
+    return {"mensaje": "Caja cerrada"}

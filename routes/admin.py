@@ -5,6 +5,11 @@ from datetime import datetime, timedelta
 
 router = APIRouter(prefix="/admin", tags=["Admin SaaS"])
 
+ESTADO_VENCIDA = "vencida"
+ESTADO_PAGADA = "pagada"
+ESTADOS_VENCIDA_ALIAS = [ESTADO_VENCIDA, "vencido"]
+ESTADOS_PAGADA_ALIAS = [ESTADO_PAGADA, "pagado"]
+
 
 # =====================================================
 # VALIDAR ADMIN MASTER
@@ -96,26 +101,26 @@ def saas_metrics(usuario=Depends(get_current_user)):
     # =========================
 
     cuentas_pagadas = supabase.table("cuentas_matriz") \
-        .select("monto") \
-        .eq("estado", "pagado") \
+        .select("monto,monto_total") \
+        .in_("estado", ESTADOS_PAGADA_ALIAS) \
         .gte("fecha_pago", inicio_mes.isoformat()) \
         .execute().data or []
 
-    ingresos_mes = sum(c["monto"] for c in cuentas_pagadas)
+    ingresos_mes = sum((c.get("monto_total") or c.get("monto") or 0) for c in cuentas_pagadas)
 
     cuentas_pendientes = supabase.table("cuentas_matriz") \
-        .select("monto") \
+        .select("monto,monto_total") \
         .eq("estado", "pendiente") \
         .execute().data or []
 
-    ingresos_pendientes = sum(c["monto"] for c in cuentas_pendientes)
+    ingresos_pendientes = sum((c.get("monto_total") or c.get("monto") or 0) for c in cuentas_pendientes)
 
     cuentas_vencidas = supabase.table("cuentas_matriz") \
-        .select("monto") \
-        .eq("estado", "vencido") \
+        .select("monto,monto_total") \
+        .in_("estado", ESTADOS_VENCIDA_ALIAS) \
         .execute().data or []
 
-    ingresos_vencidos = sum(c["monto"] for c in cuentas_vencidas)
+    ingresos_vencidos = sum((c.get("monto_total") or c.get("monto") or 0) for c in cuentas_vencidas)
 
     # =========================
     # MRR / ARR

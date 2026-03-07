@@ -4,6 +4,9 @@ from database import supabase
 
 router = APIRouter(prefix="/pagos", tags=["Panel Pago"])
 
+ESTADO_VENCIDA = "vencida"
+ESTADOS_VENCIDA_ALIAS = [ESTADO_VENCIDA, "vencido"]
+
 
 @router.get("/deuda")
 def ver_deuda(usuario: dict = Depends(get_current_user)):
@@ -19,7 +22,7 @@ def ver_deuda(usuario: dict = Depends(get_current_user)):
     deuda = supabase.table("cuentas_matriz") \
         .select("*") \
         .eq("id_empresa_matriz", id_empresa) \
-        .eq("estado", "vencida") \
+        .in_("estado", ESTADOS_VENCIDA_ALIAS) \
         .execute()
 
     return {"deudas": deuda.data}
