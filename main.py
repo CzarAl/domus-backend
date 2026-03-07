@@ -24,6 +24,7 @@ from routes.admin import router as admin_router
 from routes.dashboard import router as dashboard_router
 from routes.vendedores import router as vendedores_router
 from routes.sucursales import router as sucursales_router
+from routes.wallet import router as wallet_router
 from routes import admin_saas
 from routes import empresas
 from routes import pagos
@@ -135,6 +136,7 @@ app.include_router(admin_cargos.router)
 app.include_router(empresa_finanzas.router)
 app.include_router(vendedores_router)
 app.include_router(sucursales_router)
+app.include_router(wallet_router)
 
 
 # Admin SaaS protegido (solo admin_master pasa por dependency)
@@ -267,12 +269,18 @@ def dashboard_tienda(usuario=Depends(get_current_user)):
     total_ventas = sum(v["total"] for v in ventas)
     cantidad_ventas = ventas_resp.count or 0
 
-    # 🔹 Ventas del mes actual
+    # 🔹 Ventas del mes y del día
     from datetime import datetime
-    inicio_mes = datetime.now().replace(day=1).isoformat()
 
-    ventas_mes = [v for v in ventas if v["fecha"] >= inicio_mes]
+    ahora = datetime.now()
+    inicio_mes = ahora.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    inicio_dia = ahora.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    ventas_mes = [v for v in ventas if (v.get("fecha") or "") >= inicio_mes]
     total_mes = sum(v["total"] for v in ventas_mes)
+
+    ventas_hoy = [v for v in ventas if (v.get("fecha") or "") >= inicio_dia]
+    total_hoy = sum(v["total"] for v in ventas_hoy)
 
     # 🔹 Ventas por sucursal
     ventas_por_sucursal = {}
@@ -322,12 +330,14 @@ def dashboard_tienda(usuario=Depends(get_current_user)):
         "total_ventas": total_ventas,
         "cantidad_ventas": cantidad_ventas,
         "ventas_mes_actual": total_mes,
+        "ventas_hoy": total_hoy,
+        "transacciones_hoy": len(ventas_hoy),
         "ventas_por_sucursal": ventas_por_sucursal,
         "ventas_por_vendedor": ventas_por_vendedor,
         "producto_mas_vendido": producto_mas_vendido,
     }
 
-    
+
 # =================================
 # LOGIN
 # =================================
@@ -524,7 +534,7 @@ def autorizar_recurso(
     usuario=Depends(require_role("admin_master"))
 ):
     # Validar tipo permitido
-    if tipo_recurso not in ["vendedor", "sucursal", "web_publica"]:
+    if tipo_recurso not in ["vendedor", "sucursal", "web_publica", "wallet"]:
         raise HTTPException(status_code=400, detail="Tipo de recurso inválido")
 
     data = {
@@ -662,4 +672,9 @@ def cambiar_password(
         .execute()
 
     return {"mensaje": "Contraseña actualizada correctamente"}
+
+
+
+
+
 

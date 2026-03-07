@@ -11,8 +11,7 @@ router = APIRouter(prefix="/sucursales", tags=["Sucursales"])
 
 class CrearSucursalRequest(BaseModel):
     nombre: str
-    direccion: str | None = None
-    telefono: str | None = None
+    tipo: str | None = None
 
 
 @router.post("/crear")
@@ -40,14 +39,10 @@ def crear_sucursal(
             "id": str(uuid.uuid4()),
             "id_empresa": id_empresa,
             "nombre": datos.nombre,
-            "activo": True,
+            "es_matriz": False,
+            "tipo": (datos.tipo or "sucursal"),
             "fecha_creacion": datetime.utcnow().isoformat(),
         }
-
-        if datos.direccion is not None:
-            payload["direccion"] = datos.direccion
-        if datos.telefono is not None:
-            payload["telefono"] = datos.telefono
 
         nueva_sucursal = supabase.table("sucursales").insert(payload).execute()
 
@@ -78,4 +73,3 @@ def listar_sucursales(usuario_actual=Depends(get_current_user)):
     )
 
     return response.data
-

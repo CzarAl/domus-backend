@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from database import supabase
-from datetime import datetime
+from datetime import date, datetime
 from fastapi.responses import JSONResponse
 from dependencies import require_role
 from pydantic import BaseModel, Field
@@ -14,12 +14,12 @@ ESTADO_VENCIDA = "vencida"
 ESTADO_PAGADA = "pagada"
 ESTADOS_VENCIDA_ALIAS = [ESTADO_VENCIDA, "vencido"]
 ESTADOS_PAGADA_ALIAS = [ESTADO_PAGADA, "pagado"]
-TIPOS_RECURSO = ("vendedor", "sucursal", "web_publica")
+TIPOS_RECURSO = ("vendedor", "sucursal", "web_publica", "wallet")
 
 
 class AutorizacionRecursoCreate(BaseModel):
     id_empresa: str
-    tipo_recurso: Literal["vendedor", "sucursal", "web_publica"]
+    tipo_recurso: Literal["vendedor", "sucursal", "web_publica", "wallet"]
     cantidad_autorizada: int = Field(gt=0)
     costo_mensual: float = Field(gt=0)
     cerrar_autorizaciones_previas: bool = False
@@ -30,6 +30,29 @@ class AutorizacionRecursoUpdate(BaseModel):
     costo_mensual: float | None = Field(default=None, gt=0)
     activo: bool | None = None
     fecha_fin: datetime | None = None
+
+
+class CancelarAutorizacionRequest(BaseModel):
+    backup_wallet: bool = False
+    nombre_backup: str | None = Field(default=None, min_length=3, max_length=80)
+
+
+def _slug_text(texto: str) -> str:
+    limpio = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in texto)
+    limpio = limpio.strip("_")
+    return limpio or "backup"
+
+
+def _parse_date(value):
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    s = str(value)
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+    except Exception:
+        return None
 
 
 def _obtener_cuentas_vencidas(empresa_id: str):
@@ -60,6 +83,84 @@ def _obtener_fecha_fin_ultima_pagada(empresa_id: str):
     return registro.get("periodo_fin") or registro.get("fecha_vencimiento")
 
 
+def _activar_recurso_wallet(id_empresa: str, costo_mensual: float):
+    hoy = date.today().isoformat()
+
+    supabase.table("recursos_activos_empresa").update(
+        {"fecha_fin": hoy}
+    ).eq("id_empresa", id_empresa).eq("tipo_recurso", "wallet").is_("fecha_fin", "null").execute()
+
+    supabase.table("recursos_activos_empresa").insert(
+        {
+            "id": str(uuid.uuid4()),
+            "id_empresa": id_empresa,
+            "tipo_recurso": "wallet",
+            "fecha_inicio": hoy,
+            "fecha_fin": None,
+            "costo_mensual": costo_mensual,
+            "fecha_creacion": datetime.utcnow().isoformat(),
+        }
+    ).execute()
+
+
+def _cerrar_recurso_wallet(id_empresa: str):
+    hoy = date.today().isoformat()
+    supabase.table("recursos_activos_empresa").update(
+        {"fecha_fin": hoy}
+    ).eq("id_empresa", id_empresa).eq("tipo_recurso", "wallet").is_("fecha_fin", "null").execute()
+
+
+def _crear_backup_wallet_empresa(id_empresa: str, nombre_backup: str, id_usuario: str | None):
+    cuentas = (
+        supabase.table("wallet_cuentas")
+        .select("*")
+        .eq("id_empresa", id_empresa)
+        .execute()
+    ).data or []
+
+    ids_cuentas = [c.get("id") for c in cuentas if c.get("id")]
+
+    movimientos = []
+    if ids_cuentas:
+        movimientos = (
+            supabase.table("wallet_movimientos")
+            .select("*")
+            .in_("id_cuenta", ids_cuentas)
+            .execute()
+        ).data or []
+
+    payload = {
+        "tipo_respaldo": "wallet",
+        "nombre_respaldo": nombre_backup,
+        "id_empresa": id_empresa,
+        "generado_por": id_usuario,
+        "fecha": datetime.utcnow().isoformat(),
+        "cuentas": cuentas,
+        "movimientos": movimientos,
+    }
+
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    nombre_archivo = f"wallet_{_slug_text(nombre_backup)}_{stamp}.json"
+
+    respaldo = (
+        supabase.table("empresas_backup")
+        .insert(
+            {
+                "id_empresa_original": id_empresa,
+                "nombre_empresa": f"WALLET::{nombre_backup}",
+                "nombre_archivo": nombre_archivo,
+                "datos": payload,
+            }
+        )
+        .execute()
+    )
+
+    if not respaldo.data:
+        raise HTTPException(status_code=500, detail="No se pudo guardar backup de wallet")
+
+    return respaldo.data[0]
+
+
 @router.post("/autorizaciones")
 def crear_autorizacion_recurso(
     datos: AutorizacionRecursoCreate,
@@ -67,6 +168,9 @@ def crear_autorizacion_recurso(
 ):
     if datos.tipo_recurso not in TIPOS_RECURSO:
         raise HTTPException(status_code=400, detail="Tipo de recurso inválido")
+
+    if datos.tipo_recurso == "wallet" and datos.cantidad_autorizada != 1:
+        raise HTTPException(status_code=400, detail="Wallet solo permite cantidad_autorizada = 1")
 
     if datos.cerrar_autorizaciones_previas:
         (
@@ -92,6 +196,9 @@ def crear_autorizacion_recurso(
     }
 
     response = supabase.table("autorizaciones_admin_empresa").insert(payload).execute()
+
+    if datos.tipo_recurso == "wallet":
+        _activar_recurso_wallet(datos.id_empresa, datos.costo_mensual)
 
     return {
         "mensaje": "Autorización creada correctamente",
@@ -120,9 +227,24 @@ def actualizar_autorizacion_recurso(
     datos: AutorizacionRecursoUpdate,
     usuario=Depends(require_role(ADMIN_MASTER_ROLE))
 ):
+    autorizacion_actual = (
+        supabase.table("autorizaciones_admin_empresa")
+        .select("*")
+        .eq("id", id_autorizacion)
+        .limit(1)
+        .execute()
+    )
+
+    if not autorizacion_actual.data:
+        raise HTTPException(status_code=404, detail="Autorización no encontrada")
+
+    auth = autorizacion_actual.data[0]
+
     update_data = {}
 
     if datos.cantidad_autorizada is not None:
+        if auth.get("tipo_recurso") == "wallet" and datos.cantidad_autorizada != 1:
+            raise HTTPException(status_code=400, detail="Wallet solo permite cantidad_autorizada = 1")
         update_data["cantidad_autorizada"] = datos.cantidad_autorizada
     if datos.costo_mensual is not None:
         update_data["costo_mensual"] = datos.costo_mensual
@@ -143,6 +265,12 @@ def actualizar_autorizacion_recurso(
         .execute()
     )
 
+    if auth.get("tipo_recurso") == "wallet":
+        if datos.activo is False:
+            _cerrar_recurso_wallet(auth["id_empresa"])
+        elif datos.costo_mensual is not None and (datos.activo is None or datos.activo is True):
+            _activar_recurso_wallet(auth["id_empresa"], datos.costo_mensual)
+
     return {
         "mensaje": "Autorización actualizada correctamente",
         "data": response.data,
@@ -152,8 +280,32 @@ def actualizar_autorizacion_recurso(
 @router.post("/autorizaciones/{id_autorizacion}/cancelar")
 def cancelar_autorizacion_recurso(
     id_autorizacion: str,
+    datos: CancelarAutorizacionRequest | None = None,
     usuario=Depends(require_role(ADMIN_MASTER_ROLE))
 ):
+    autorizacion = (
+        supabase.table("autorizaciones_admin_empresa")
+        .select("*")
+        .eq("id", id_autorizacion)
+        .limit(1)
+        .execute()
+    )
+
+    if not autorizacion.data:
+        raise HTTPException(status_code=404, detail="Autorización no encontrada")
+
+    auth = autorizacion.data[0]
+    backup_id = None
+
+    if auth.get("tipo_recurso") == "wallet" and datos and datos.backup_wallet:
+        nombre_backup = datos.nombre_backup or f"wallet_{auth.get('id_empresa')}"
+        backup = _crear_backup_wallet_empresa(
+            auth["id_empresa"],
+            nombre_backup,
+            usuario.get("id_usuario") or usuario.get("id"),
+        )
+        backup_id = backup.get("id")
+
     response = (
         supabase.table("autorizaciones_admin_empresa")
         .update({
@@ -164,8 +316,12 @@ def cancelar_autorizacion_recurso(
         .execute()
     )
 
+    if auth.get("tipo_recurso") == "wallet":
+        _cerrar_recurso_wallet(auth["id_empresa"])
+
     return {
         "mensaje": "Autorización cancelada correctamente",
+        "backup_id": backup_id,
         "data": response.data,
     }
 
