@@ -18,6 +18,7 @@ from dependencies import require_role
 from routes.usuarios import router as usuarios_router
 from routes.clientes import router as clientes_router
 from routes.inventario import router as inventario_router
+from routes.productos import router as productos_router
 from routes.ventas import router as ventas_router
 from routes.caja import router as caja_router
 from routes.admin import router as admin_router
@@ -127,6 +128,7 @@ app.include_router(usuarios_router)
 
 app.include_router(clientes_router, dependencies=[Depends(get_current_user)])
 app.include_router(inventario_router, dependencies=[Depends(get_current_user)])
+app.include_router(productos_router, dependencies=[Depends(get_current_user)])
 app.include_router(ventas_router, dependencies=[Depends(get_current_user)])
 app.include_router(caja_router, dependencies=[Depends(get_current_user)])
 app.include_router(admin_router, dependencies=[Depends(get_current_user)])
@@ -672,6 +674,8 @@ def cambiar_password(
         .execute()
 
     return {"mensaje": "Contraseña actualizada correctamente"}
+
+
 
 
 
