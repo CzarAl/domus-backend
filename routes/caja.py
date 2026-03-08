@@ -138,6 +138,25 @@ def abrir_caja(datos: AperturaCaja, usuario=Depends(get_current_user)):
     }
 
     creada = supabase.table("sesiones_caja").insert(payload).execute()
+
+    # Registrar movimiento de apertura como entrada
+    try:
+        mov_payload = {
+            "id": str(uuid.uuid4()),
+            "id_sesion": payload["id"],
+            "id_empresa": id_empresa,
+            "id_sucursal": datos.id_sucursal,
+            "id_usuario": id_usuario,
+            "tipo_movimiento": "entrada",
+            "monto": float(datos.monto_inicial),
+            "concepto": "apertura",
+            "metodo_pago": "efectivo",
+            "fecha_creacion": datetime.utcnow().isoformat(),
+        }
+        supabase.table("movimientos_caja").insert(mov_payload).execute()
+    except Exception:
+        pass
+
     return {"mensaje": "Caja abierta", "data": creada.data[0] if creada.data else payload}
 
 
@@ -306,3 +325,4 @@ def cerrar_caja(id_sesion: str, datos: CierreCaja, usuario=Depends(get_current_u
             "por_metodo": totales["por_metodo"],
         },
     }
+

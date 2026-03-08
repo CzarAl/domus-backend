@@ -17,6 +17,8 @@ class ProductoCreate(BaseModel):
     precio: float = Field(gt=0)
     ubicacion: str | None = Field(default=None, max_length=180)
     foto_url: str | None = Field(default=None, max_length=1000)
+    id_sucursal_inicial: str | None = None
+    stock_inicial: int | None = Field(default=None, ge=0)
 
 
 class ProductoUpdate(BaseModel):
@@ -27,6 +29,8 @@ class ProductoUpdate(BaseModel):
     ubicacion: str | None = Field(default=None, max_length=180)
     foto_url: str | None = Field(default=None, max_length=1000)
     activo: bool | None = None
+    id_sucursal_inicial: str | None = None
+    stock_inicial: int | None = Field(default=None, ge=0)
 
 
 def _id_empresa(usuario: dict) -> str:
@@ -157,6 +161,23 @@ def crear_producto(datos: ProductoCreate, usuario=Depends(get_current_user)):
     }
 
     creado = _try_insert_producto([payload_full, payload_alt, payload_min])
+
+    # Crear inventario inicial si se envió sucursal y stock
+    if datos.id_sucursal_inicial and datos.stock_inicial is not None:
+        try:
+            supabase.table("inventario").insert({
+                "id": str(uuid.uuid4()),
+                "id_empresa": id_empresa,
+                "id_sucursal": datos.id_sucursal_inicial,
+                "id_producto": payload_full["id"],
+                "stock": int(datos.stock_inicial),
+                "stock_minimo": 0,
+                "fecha_actualizacion": now,
+                "stock_reservado": 0
+            }).execute()
+        except Exception:
+            pass
+
     return {"mensaje": "Producto creado", "data": _normalizar_producto(creado)}
 
 
@@ -190,8 +211,11 @@ def actualizar_producto(id_producto: str, datos: ProductoUpdate, usuario=Depends
         base["foto_url"] = datos.foto_url.strip() or None
     if datos.activo is not None:
         base["activo"] = datos.activo
+    inv_extra = None
+    if datos.id_sucursal_inicial is not None and datos.stock_inicial is not None:
+        inv_extra = {"id_sucursal": datos.id_sucursal_inicial, "stock": int(datos.stock_inicial)}
 
-    if not base:
+    if not base and not inv_extra:
         raise HTTPException(status_code=400, detail="Sin cambios")
 
     alt = {}
@@ -211,6 +235,22 @@ def actualizar_producto(id_producto: str, datos: ProductoUpdate, usuario=Depends
         alt["activo"] = base["activo"]
 
     actualizado = _try_update_producto(id_producto, id_empresa, [base, alt])
+
+    if inv_extra:
+        try:
+            supabase.table("inventario").upsert({
+                "id": str(uuid.uuid4()),
+                "id_empresa": id_empresa,
+                "id_sucursal": inv_extra["id_sucursal"],
+                "id_producto": id_producto,
+                "stock": int(inv_extra["stock"]),
+                "stock_minimo": 0,
+                "fecha_actualizacion": datetime.utcnow().isoformat(),
+                "stock_reservado": 0
+            }, on_conflict="id_producto,id_sucursal").execute()
+        except Exception:
+            pass
+
     return {"mensaje": "Producto actualizado", "data": _normalizar_producto(actualizado)}
 
 

@@ -26,6 +26,7 @@ from routes.dashboard import router as dashboard_router
 from routes.vendedores import router as vendedores_router
 from routes.sucursales import router as sucursales_router
 from routes.wallet import router as wallet_router
+from routes.uploads import router as uploads_router
 from routes import admin_saas
 from routes import empresas
 from routes import pagos
@@ -139,6 +140,7 @@ app.include_router(empresa_finanzas.router)
 app.include_router(vendedores_router)
 app.include_router(sucursales_router)
 app.include_router(wallet_router)
+app.include_router(uploads_router)
 
 
 # Admin SaaS protegido (solo admin_master pasa por dependency)
@@ -674,6 +676,8 @@ def cambiar_password(
         .execute()
 
     return {"mensaje": "Contraseña actualizada correctamente"}
+
+
 
 
 
