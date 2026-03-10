@@ -30,6 +30,7 @@ class VentaNueva(BaseModel):
     detalles: list[ItemVentaNueva]
     confirmar_transferencia: bool = False
     generar_pdf: bool = False
+    origen_venta: str = "fisica"
 
 
 def _id_empresa(usuario: dict) -> str:
@@ -238,7 +239,7 @@ def _ajustar_stock_si_no_lo_hizo_rpc(id_empresa: str, id_sucursal: str, detalles
             ).eq("id", inv.get("id")).execute()
 
 
-def _registrar_movimiento_caja_venta(id_empresa: str, id_sucursal: str, id_usuario: str | None, monto: float, metodo_pago: str, id_venta: str):
+def _registrar_movimiento_caja_venta(id_empresa: str, id_sucursal: str, id_usuario: str | None, monto: float, metodo_pago: str, id_venta: str, origen_venta: str):
     sesion = (
         supabase.table("sesiones_caja")
         .select("id")
@@ -264,7 +265,7 @@ def _registrar_movimiento_caja_venta(id_empresa: str, id_sucursal: str, id_usuar
         "id_sucursal": id_sucursal,
         "id_usuario": id_usuario,
         "tipo_movimiento": "entrada",
-        "concepto": "venta",
+        "concepto": "venta_online" if origen_venta == "online" else "venta_fisica",
         "metodo_pago": metodo_pago,
         "monto": float(monto or 0),
         "referencia": id_venta,
@@ -276,7 +277,7 @@ def _registrar_movimiento_caja_venta(id_empresa: str, id_sucursal: str, id_usuar
         "id_sesion": id_sesion,
         "id_empresa": id_empresa,
         "tipo_movimiento": "entrada",
-        "concepto": "venta",
+        "concepto": "venta_online" if origen_venta == "online" else "venta_fisica",
         "monto": float(monto or 0),
         "fecha_creacion": datetime.utcnow().isoformat(),
     }
@@ -335,6 +336,7 @@ def listar_ventas(usuario=Depends(get_current_user)):
         salida.append(
             {
                 **venta,
+                "origen_venta": venta.get("origen_venta") or "fisica",
                 "sucursal_nombre": suc_map.get(venta.get("id_sucursal")),
                 "cliente_nombre": cli_map.get(venta.get("id_cliente")),
                 "detalles": detalles_map.get(vid, []),
@@ -428,7 +430,12 @@ def crear_venta_nueva(datos: VentaNueva, usuario=Depends(get_current_user)):
 
     _actualizar_snapshot_detalles(id_venta, productos_map)
     _ajustar_stock_si_no_lo_hizo_rpc(id_empresa, datos.id_sucursal, detalles_rpc, stock_antes)
-    _registrar_movimiento_caja_venta(id_empresa, datos.id_sucursal, usuario.get("id_usuario"), total, datos.metodo_pago, id_venta)
+    try:
+        supabase.table("ventas").update({"origen_venta": datos.origen_venta or "fisica"}).eq("id", id_venta).execute()
+    except Exception:
+        pass
+
+    _registrar_movimiento_caja_venta(id_empresa, datos.id_sucursal, usuario.get("id_usuario"), total, datos.metodo_pago, id_venta, datos.origen_venta or "fisica")
 
     venta = (
         supabase.table("ventas")
@@ -474,6 +481,7 @@ def crear_venta_nueva(datos: VentaNueva, usuario=Depends(get_current_user)):
         "sucursal": sucursal[0] if sucursal else {"id": datos.id_sucursal},
         "cliente": cliente[0] if cliente else None,
         "metodo_pago": datos.metodo_pago,
+        "origen_venta": datos.origen_venta or "fisica",
         "subtotal": subtotal,
         "iva": float(datos.iva or 0),
         "flete": float(datos.flete or 0),

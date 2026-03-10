@@ -40,6 +40,7 @@ from routes import pagos
 from routes import admin_cargos
 from routes import empresa_finanzas
 from routes import mr
+from routes import storefront
 
 
 import os
@@ -57,6 +58,7 @@ app = FastAPI()
 
 # Routers
 app.include_router(mr.router)
+app.include_router(storefront.router)
 
 # =================================
 # MIDDLEWARE AUDITORÍA BLOQUEO

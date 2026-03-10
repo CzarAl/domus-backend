@@ -1,4 +1,6 @@
 from datetime import datetime
+import re
+import unicodedata
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,6 +19,12 @@ class ProductoCreate(BaseModel):
     precio: float = Field(gt=0)
     ubicacion: str | None = Field(default=None, max_length=180)
     foto_url: str | None = Field(default=None, max_length=1000)
+    categoria: str | None = Field(default=None, max_length=80)
+    slug: str | None = Field(default=None, max_length=160)
+    visible_publico: bool = True
+    destacado: bool = False
+    origen_catalogo: str | None = Field(default="manual", max_length=40)
+    imagenes_extra: list[str] | None = None
     id_sucursal_inicial: str | None = None
     stock_inicial: int | None = Field(default=None, ge=0)
 
@@ -28,6 +36,12 @@ class ProductoUpdate(BaseModel):
     precio: float | None = Field(default=None, gt=0)
     ubicacion: str | None = Field(default=None, max_length=180)
     foto_url: str | None = Field(default=None, max_length=1000)
+    categoria: str | None = Field(default=None, max_length=80)
+    slug: str | None = Field(default=None, max_length=160)
+    visible_publico: bool | None = None
+    destacado: bool | None = None
+    origen_catalogo: str | None = Field(default=None, max_length=40)
+    imagenes_extra: list[str] | None = None
     activo: bool | None = None
     id_sucursal_inicial: str | None = None
     stock_inicial: int | None = Field(default=None, ge=0)
@@ -40,7 +54,24 @@ def _id_empresa(usuario: dict) -> str:
     return id_empresa
 
 
+def _slug_text(texto: str) -> str:
+    value = unicodedata.normalize("NFKD", texto or "").encode("ascii", "ignore").decode("ascii")
+    value = re.sub(r"[^a-zA-Z0-9]+", "-", value.lower()).strip("-")
+    return value[:160] or f"producto-{uuid.uuid4().hex[:8]}"
+
+
+def _normalize_gallery(value) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return []
+
+
 def _normalizar_producto(p: dict) -> dict:
+    slug = p.get("slug") or _slug_text(p.get("nombre") or "producto")
     return {
         "id": p.get("id"),
         "id_empresa": p.get("id_empresa"),
@@ -50,6 +81,12 @@ def _normalizar_producto(p: dict) -> dict:
         "precio": p.get("precio") if p.get("precio") is not None else p.get("precio_venta") or 0,
         "ubicacion": p.get("ubicacion") if p.get("ubicacion") is not None else p.get("ubicacion_producto"),
         "foto_url": p.get("foto_url") if p.get("foto_url") is not None else p.get("imagen_url"),
+        "categoria": p.get("categoria") or "Sin categoria",
+        "slug": slug,
+        "visible_publico": p.get("visible_publico", True),
+        "destacado": p.get("destacado", False),
+        "origen_catalogo": p.get("origen_catalogo") or "manual",
+        "imagenes_extra": _normalize_gallery(p.get("imagenes_extra")),
         "activo": p.get("activo", True),
         "fecha_creacion": p.get("fecha_creacion"),
     }
@@ -125,16 +162,30 @@ def obtener_producto(id_producto: str, usuario=Depends(get_current_user)):
 def crear_producto(datos: ProductoCreate, usuario=Depends(get_current_user)):
     id_empresa = _id_empresa(usuario)
     now = datetime.utcnow().isoformat()
+    nombre = datos.nombre.strip()
+    descripcion = (datos.descripcion or "").strip() or None
+    ubicacion = (datos.ubicacion or "").strip() or None
+    foto_url = (datos.foto_url or "").strip() or None
+    categoria = (datos.categoria or "").strip() or None
+    slug = _slug_text(datos.slug.strip()) if datos.slug else _slug_text(nombre)
+    imagenes_extra = _normalize_gallery(datos.imagenes_extra)
+    origen_catalogo = (datos.origen_catalogo or "manual").strip() or "manual"
 
     payload_full = {
         "id": str(uuid.uuid4()),
         "id_empresa": id_empresa,
-        "nombre": datos.nombre.strip(),
-        "descripcion": (datos.descripcion or "").strip() or None,
+        "nombre": nombre,
+        "descripcion": descripcion,
         "costo_adquisicion": datos.costo_adquisicion,
         "precio": datos.precio,
-        "ubicacion": (datos.ubicacion or "").strip() or None,
-        "foto_url": (datos.foto_url or "").strip() or None,
+        "ubicacion": ubicacion,
+        "foto_url": foto_url,
+        "categoria": categoria,
+        "slug": slug,
+        "visible_publico": datos.visible_publico,
+        "destacado": datos.destacado,
+        "origen_catalogo": origen_catalogo,
+        "imagenes_extra": imagenes_extra,
         "activo": True,
         "fecha_creacion": now,
     }
@@ -142,12 +193,12 @@ def crear_producto(datos: ProductoCreate, usuario=Depends(get_current_user)):
     payload_alt = {
         "id": payload_full["id"],
         "id_empresa": id_empresa,
-        "nombre": payload_full["nombre"],
-        "descripcion": payload_full["descripcion"],
+        "nombre": nombre,
+        "descripcion": descripcion,
         "costo": datos.costo_adquisicion,
         "precio_venta": datos.precio,
-        "ubicacion_producto": payload_full["ubicacion"],
-        "imagen_url": payload_full["foto_url"],
+        "ubicacion_producto": ubicacion,
+        "imagen_url": foto_url,
         "activo": True,
         "fecha_creacion": now,
     }
@@ -155,14 +206,13 @@ def crear_producto(datos: ProductoCreate, usuario=Depends(get_current_user)):
     payload_min = {
         "id": payload_full["id"],
         "id_empresa": id_empresa,
-        "nombre": payload_full["nombre"],
+        "nombre": nombre,
         "precio": datos.precio,
         "fecha_creacion": now,
     }
 
     creado = _try_insert_producto([payload_full, payload_alt, payload_min])
 
-    # Crear inventario inicial si se envió sucursal y stock
     if datos.id_sucursal_inicial and datos.stock_inicial is not None:
         try:
             supabase.table("inventario").insert({
@@ -173,7 +223,7 @@ def crear_producto(datos: ProductoCreate, usuario=Depends(get_current_user)):
                 "stock": int(datos.stock_inicial),
                 "stock_minimo": 0,
                 "fecha_actualizacion": now,
-                "stock_reservado": 0
+                "stock_reservado": 0,
             }).execute()
         except Exception:
             pass
@@ -187,7 +237,7 @@ def actualizar_producto(id_producto: str, datos: ProductoUpdate, usuario=Depends
 
     actual = (
         supabase.table("productos")
-        .select("id")
+        .select("id,nombre")
         .eq("id", id_producto)
         .eq("id_empresa", id_empresa)
         .limit(1)
@@ -197,8 +247,10 @@ def actualizar_producto(id_producto: str, datos: ProductoUpdate, usuario=Depends
         raise HTTPException(status_code=404, detail="Producto no encontrado")
 
     base = {}
+    nombre_actual = actual.data[0].get("nombre") or "producto"
     if datos.nombre is not None:
         base["nombre"] = datos.nombre.strip()
+        nombre_actual = base["nombre"]
     if datos.descripcion is not None:
         base["descripcion"] = datos.descripcion.strip() or None
     if datos.costo_adquisicion is not None:
@@ -209,8 +261,21 @@ def actualizar_producto(id_producto: str, datos: ProductoUpdate, usuario=Depends
         base["ubicacion"] = datos.ubicacion.strip() or None
     if datos.foto_url is not None:
         base["foto_url"] = datos.foto_url.strip() or None
+    if datos.categoria is not None:
+        base["categoria"] = datos.categoria.strip() or None
+    if datos.slug is not None:
+        base["slug"] = _slug_text(datos.slug.strip()) if datos.slug.strip() else _slug_text(nombre_actual)
+    if datos.visible_publico is not None:
+        base["visible_publico"] = datos.visible_publico
+    if datos.destacado is not None:
+        base["destacado"] = datos.destacado
+    if datos.origen_catalogo is not None:
+        base["origen_catalogo"] = datos.origen_catalogo.strip() or "manual"
+    if datos.imagenes_extra is not None:
+        base["imagenes_extra"] = _normalize_gallery(datos.imagenes_extra)
     if datos.activo is not None:
         base["activo"] = datos.activo
+
     inv_extra = None
     if datos.id_sucursal_inicial is not None and datos.stock_inicial is not None:
         inv_extra = {"id_sucursal": datos.id_sucursal_inicial, "stock": int(datos.stock_inicial)}
@@ -246,7 +311,7 @@ def actualizar_producto(id_producto: str, datos: ProductoUpdate, usuario=Depends
                 "stock": int(inv_extra["stock"]),
                 "stock_minimo": 0,
                 "fecha_actualizacion": datetime.utcnow().isoformat(),
-                "stock_reservado": 0
+                "stock_reservado": 0,
             }, on_conflict="id_producto,id_sucursal").execute()
         except Exception:
             pass
