@@ -10,7 +10,14 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 
 from database import supabase
-from auth import crear_access_token, crear_refresh_token, verificar_token
+from auth import (
+    crear_access_token,
+    crear_refresh_token,
+    crear_recovery_token,
+    recovery_fingerprint,
+    verificar_recovery_token,
+    verificar_token,
+)
 from dependencies import get_current_user
 from dependencies import require_role
 
@@ -173,6 +180,17 @@ class RefreshData(BaseModel):
     refresh_token: str
 
 
+class CambiarPasswordData(BaseModel):
+    password_actual: str
+    password_nueva: str
+
+
+class RestablecerPasswordData(BaseModel):
+    correo: str
+    codigo_recuperacion: str
+    password_nueva: str
+
+
 def _claims_from_contexto(contexto_usuario: dict, permisos: dict | None = None):
     permisos = permisos or {}
     rol = contexto_usuario["nivel"]
@@ -187,6 +205,40 @@ def _claims_from_contexto(contexto_usuario: dict, permisos: dict | None = None):
         "id_vendedor": contexto_usuario["id_vendedor"],
         "permisos": permisos,
     }
+
+
+def _obtener_usuario_auth_por_id(id_usuario: str):
+    respuesta = (
+        supabase.table("usuarios")
+        .select("id,email,password_hash,activo")
+        .eq("id", id_usuario)
+        .limit(1)
+        .execute()
+    )
+
+    if not respuesta.data:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    return respuesta.data[0]
+
+
+def _obtener_usuario_auth_por_correo(correo: str):
+    respuesta = (
+        supabase.table("usuarios")
+        .select("id,email,password_hash,activo")
+        .eq("email", correo)
+        .limit(1)
+        .execute()
+    )
+
+    if not respuesta.data:
+        raise HTTPException(status_code=401, detail="No se pudo restablecer la contrasena")
+
+    return respuesta.data[0]
+
+
+def _hashear_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 def _obtener_contexto_por_usuario(id_usuario: str):
@@ -647,50 +699,85 @@ def listar_empresas(
 
  
 # =================================
-# CAMBIAR PASSWORD
+# PASSWORD Y RECUPERACION
 # =================================
-class CambiarPasswordData(BaseModel):
-    password_actual: str
-    password_nueva: str
-
-
 @app.post("/cambiar-password")
 def cambiar_password(
     datos: CambiarPasswordData,
     usuario_actual: dict = Depends(get_current_user)
 ):
-    # Verificar contraseña actual
+    if len(datos.password_nueva or "") < 6:
+        raise HTTPException(status_code=400, detail="La nueva contrasena debe tener al menos 6 caracteres")
+
+    usuario_db = _obtener_usuario_auth_por_id(usuario_actual["id"])
+
     if not bcrypt.checkpw(
         datos.password_actual.encode("utf-8"),
-        usuario_actual["password_hash"].encode("utf-8")
+        usuario_db["password_hash"].encode("utf-8")
     ):
         raise HTTPException(
             status_code=401,
-            detail="Contraseña actual incorrecta"
+            detail="Contrasena actual incorrecta"
         )
 
-    # Hashear nueva contraseña
-    nuevo_hash = bcrypt.hashpw(
-        datos.password_nueva.encode("utf-8"),
-        bcrypt.gensalt()
-    ).decode("utf-8")
+    nuevo_hash = _hashear_password(datos.password_nueva)
 
-    # Actualizar en base de datos
-    supabase.table("usuarios") \
-        .update({"password_hash": nuevo_hash}) \
-        .eq("id", usuario_actual["id"]) \
-        .execute()
+    supabase.table("usuarios")         .update({"password_hash": nuevo_hash})         .eq("id", usuario_actual["id"])         .execute()
 
-    return {"mensaje": "Contraseña actualizada correctamente"}
+    codigo_recuperacion = crear_recovery_token(usuario_db["id"], usuario_db["email"], nuevo_hash)
+
+    return {
+        "mensaje": "Contrasena actualizada correctamente",
+        "codigo_recuperacion": codigo_recuperacion,
+    }
 
 
+@app.post("/generar-codigo-recuperacion")
+def generar_codigo_recuperacion(usuario_actual: dict = Depends(get_current_user)):
+    usuario_db = _obtener_usuario_auth_por_id(usuario_actual["id"])
+
+    if not usuario_db.get("email") or not usuario_db.get("password_hash"):
+        raise HTTPException(status_code=400, detail="No se pudo generar el codigo de recuperacion")
+
+    codigo_recuperacion = crear_recovery_token(
+        usuario_db["id"],
+        usuario_db["email"],
+        usuario_db["password_hash"],
+    )
+
+    return {
+        "mensaje": "Guarda este codigo en un lugar seguro. Solo se muestra al generarlo.",
+        "codigo_recuperacion": codigo_recuperacion,
+    }
 
 
+@app.post("/restablecer-password")
+def restablecer_password(datos: RestablecerPasswordData):
+    correo = (datos.correo or "").strip().lower()
+    codigo_recuperacion = (datos.codigo_recuperacion or "").strip()
 
+    if not correo or not codigo_recuperacion:
+        raise HTTPException(status_code=400, detail="Captura correo y codigo de recuperacion")
 
+    if len(datos.password_nueva or "") < 6:
+        raise HTTPException(status_code=400, detail="La nueva contrasena debe tener al menos 6 caracteres")
 
+    payload = verificar_recovery_token(codigo_recuperacion)
+    usuario_db = _obtener_usuario_auth_por_correo(correo)
 
+    if payload.get("id_usuario") != usuario_db.get("id") or payload.get("email") != usuario_db.get("email"):
+        raise HTTPException(status_code=401, detail="Codigo de recuperacion invalido")
 
+    if payload.get("pwdv") != recovery_fingerprint(usuario_db["password_hash"]):
+        raise HTTPException(status_code=401, detail="Ese codigo ya no es valido. Genera uno nuevo desde tu panel.")
 
+    nuevo_hash = _hashear_password(datos.password_nueva)
 
+    supabase.table("usuarios")         .update({"password_hash": nuevo_hash})         .eq("id", usuario_db["id"])         .execute()
 
+    nuevo_codigo = crear_recovery_token(usuario_db["id"], usuario_db["email"], nuevo_hash)
+
+    return {
+        "mensaje": "Contrasena restablecida correctamente",
+        "codigo_recuperacion": nuevo_codigo,
+    }
