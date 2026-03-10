@@ -27,14 +27,101 @@ def _slug_text(texto: str) -> str:
     return limpio or "backup"
 
 
+PORTAL_PERMISSION_DEFAULTS = {
+    "domus": {
+        "enabled": True,
+        "features": {
+            "dashboard": True,
+            "ventas": True,
+            "caja": True,
+            "sucursales": True,
+            "vendedores": True,
+            "productos": True,
+            "clientes": True,
+            "wallet": True,
+        },
+    },
+    "mr": {
+        "enabled": True,
+        "features": {
+            "expedientes": True,
+            "pendientes": True,
+            "actividades": True,
+            "alertas": True,
+            "pagos": True,
+        },
+    },
+}
+
+
+def _bool_value(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "si", "yes", "on"}
+
+
+def _portal_permissions_default_for_role(nivel_global: str):
+    permisos = {
+        modulo: {
+            "enabled": config["enabled"],
+            "features": dict(config["features"]),
+        }
+        for modulo, config in PORTAL_PERMISSION_DEFAULTS.items()
+    }
+
+    if nivel_global == "admin_master":
+        return permisos
+
+    return permisos
+
+
+def _normalizar_permisos_portal(permisos_portal, nivel_global: str):
+    base = _portal_permissions_default_for_role(nivel_global)
+
+    if not isinstance(permisos_portal, dict):
+        return base
+
+    for modulo, config in base.items():
+        incoming = permisos_portal.get(modulo)
+        if not isinstance(incoming, dict):
+            continue
+
+        enabled = _bool_value(incoming.get("enabled"), config["enabled"])
+        config["enabled"] = enabled
+
+        incoming_features = incoming.get("features") if isinstance(incoming.get("features"), dict) else {}
+        for feature, default_value in config["features"].items():
+            config["features"][feature] = enabled and _bool_value(incoming_features.get(feature), default_value)
+
+        if not enabled:
+            config["features"] = {feature: False for feature in config["features"]}
+
+    return base
+
+
 class UsuarioCrearAdmin(BaseModel):
-    email: EmailStr
+    nombre: str = Field(min_length=2, max_length=120)
+    username: str = Field(min_length=3, max_length=40)
     password: str = Field(min_length=6)
+    email: EmailStr | None = None
     nivel_global: Literal["admin_master", "usuario", "vendedor"] = "usuario"
     id_empresa: str | None = None
     rol_empresa: str | None = None
     id_sucursal: str | None = None
     nombre_vendedor: str | None = None
+    permisos_portal: dict | None = None
+
+
+class UsuarioActualizarAdmin(BaseModel):
+    nombre: str = Field(min_length=2, max_length=120)
+    username: str = Field(min_length=3, max_length=40)
+    email: EmailStr | None = None
+    nivel_global: Literal["admin_master", "usuario", "vendedor"] | None = None
+    id_empresa: str | None = None
+    rol_empresa: str | None = None
+    permisos_portal: dict | None = None
 
 
 class UsuarioEstadoUpdate(BaseModel):
@@ -66,7 +153,7 @@ def listar_usuarios(usuario=Depends(get_current_user)):
 
     usuarios_resp = (
         supabase.table("usuarios")
-        .select("id,email,nivel_global,activo,fecha_creacion,id_raiz")
+        .select("id,nombre,username,email,nivel_global,activo,fecha_creacion,id_raiz,permisos_portal")
         .order("fecha_creacion", desc=True)
         .execute()
     )
@@ -134,19 +221,35 @@ def crear_usuario_admin(datos: UsuarioCrearAdmin, usuario=Depends(get_current_us
     if datos.nivel_global == "vendedor" and not datos.id_sucursal:
         raise HTTPException(status_code=400, detail="Debes seleccionar sucursal para vendedor")
 
-    existe = (
+    username = _slug_text(datos.username.strip().lower())
+    nombre = datos.nombre.strip()
+    email = (datos.email or f"{username}@local.domus").strip().lower()
+
+    existe_email = (
         supabase.table("usuarios")
         .select("id")
-        .eq("email", datos.email)
+        .eq("email", email)
         .limit(1)
         .execute()
     )
 
-    if existe.data:
+    if existe_email.data:
         raise HTTPException(status_code=400, detail="Ya existe un usuario con ese correo")
+
+    existe_username = (
+        supabase.table("usuarios")
+        .select("id")
+        .eq("username", username)
+        .limit(1)
+        .execute()
+    )
+
+    if existe_username.data:
+        raise HTTPException(status_code=400, detail="Ya existe un usuario con ese nombre de usuario")
 
     id_usuario = str(uuid.uuid4())
     id_raiz = datos.id_empresa if datos.id_empresa else None
+    permisos_portal = _normalizar_permisos_portal(datos.permisos_portal, datos.nivel_global)
 
     password_hash = bcrypt.hashpw(datos.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
@@ -155,9 +258,12 @@ def crear_usuario_admin(datos: UsuarioCrearAdmin, usuario=Depends(get_current_us
         .insert(
             {
                 "id": id_usuario,
-                "email": datos.email,
+                "nombre": nombre,
+                "username": username,
+                "email": email,
                 "password_hash": password_hash,
                 "nivel_global": datos.nivel_global,
+                "permisos_portal": permisos_portal,
                 "activo": True,
                 "id_raiz": id_raiz,
                 "fecha_creacion": datetime.utcnow().isoformat(),
@@ -200,7 +306,7 @@ def crear_usuario_admin(datos: UsuarioCrearAdmin, usuario=Depends(get_current_us
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"No se pudo autorizar vendedor extra: {e}")
 
-        nombre_vendedor = datos.nombre_vendedor or datos.email.split("@")[0]
+        nombre_vendedor = datos.nombre_vendedor or nombre
 
         vendedor = (
             supabase.table("vendedores")
@@ -223,6 +329,105 @@ def crear_usuario_admin(datos: UsuarioCrearAdmin, usuario=Depends(get_current_us
             raise HTTPException(status_code=400, detail="Se creó usuario, pero falló crear vendedor")
 
     return {"mensaje": "Usuario creado correctamente", "id_usuario": id_usuario}
+
+
+@router.patch("/usuarios/{id_usuario}")
+def actualizar_usuario_admin(
+    id_usuario: str,
+    datos: UsuarioActualizarAdmin,
+    usuario=Depends(get_current_user),
+):
+    validar_admin(usuario)
+
+    actual_resp = (
+        supabase.table("usuarios")
+        .select("id,nombre,username,email,nivel_global,id_raiz,permisos_portal")
+        .eq("id", id_usuario)
+        .limit(1)
+        .execute()
+    )
+
+    if not actual_resp.data:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    actual = actual_resp.data[0]
+    username = _slug_text(datos.username.strip().lower())
+    email = (datos.email or actual.get("email") or f"{username}@local.domus").strip().lower()
+    nivel_global = datos.nivel_global or actual.get("nivel_global") or "usuario"
+
+    existe_username = (
+        supabase.table("usuarios")
+        .select("id")
+        .eq("username", username)
+        .limit(1)
+        .execute()
+    )
+    if existe_username.data and existe_username.data[0].get("id") != id_usuario:
+        raise HTTPException(status_code=400, detail="Ya existe un usuario con ese nombre de usuario")
+
+    existe_email = (
+        supabase.table("usuarios")
+        .select("id")
+        .eq("email", email)
+        .limit(1)
+        .execute()
+    )
+    if existe_email.data and existe_email.data[0].get("id") != id_usuario:
+        raise HTTPException(status_code=400, detail="Ya existe un usuario con ese correo")
+
+    permisos_portal = _normalizar_permisos_portal(datos.permisos_portal, nivel_global)
+    id_raiz = None if nivel_global == "admin_master" else datos.id_empresa
+
+    usuario_update = (
+        supabase.table("usuarios")
+        .update(
+            {
+                "nombre": datos.nombre.strip(),
+                "username": username,
+                "email": email,
+                "nivel_global": nivel_global,
+                "id_raiz": id_raiz,
+                "permisos_portal": permisos_portal,
+            }
+        )
+        .eq("id", id_usuario)
+        .execute()
+    )
+
+    if nivel_global == "admin_master":
+        supabase.table("usuarios_empresas").delete().eq("id_usuario", id_usuario).execute()
+    else:
+        rel_resp = (
+            supabase.table("usuarios_empresas")
+            .select("id")
+            .eq("id_usuario", id_usuario)
+            .limit(1)
+            .execute()
+        )
+        rol_empresa = datos.rol_empresa or nivel_global
+        rel_payload = {
+            "id_empresa": datos.id_empresa,
+            "rol": rol_empresa,
+            "permisos": {},
+            "activo": True,
+        }
+
+        if rel_resp.data:
+            supabase.table("usuarios_empresas").update(rel_payload).eq("id", rel_resp.data[0]["id"]).execute()
+        else:
+            supabase.table("usuarios_empresas").insert(
+                {
+                    "id": str(uuid.uuid4()),
+                    "id_usuario": id_usuario,
+                    "id_empresa": datos.id_empresa,
+                    "rol": rol_empresa,
+                    "permisos": {},
+                    "activo": True,
+                    "fecha_asignacion": datetime.utcnow().isoformat(),
+                }
+            ).execute()
+
+    return {"mensaje": "Usuario actualizado correctamente", "usuario": usuario_update.data[0] if usuario_update.data else None}
 
 
 @router.patch("/usuarios/{id_usuario}/estado")

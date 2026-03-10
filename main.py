@@ -191,7 +191,84 @@ class RestablecerPasswordData(BaseModel):
     password_nueva: str
 
 
-def _claims_from_contexto(contexto_usuario: dict, permisos: dict | None = None):
+PORTAL_PERMISSION_DEFAULTS = {
+    "domus": {
+        "enabled": True,
+        "features": {
+            "dashboard": True,
+            "ventas": True,
+            "caja": True,
+            "sucursales": True,
+            "vendedores": True,
+            "productos": True,
+            "clientes": True,
+            "wallet": True,
+        },
+    },
+    "mr": {
+        "enabled": True,
+        "features": {
+            "expedientes": True,
+            "pendientes": True,
+            "actividades": True,
+            "alertas": True,
+            "pagos": True,
+        },
+    },
+}
+
+
+def _bool_value(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "si", "yes", "on"}
+
+
+def _normalizar_permisos_portal(permisos_portal):
+    base = {
+        modulo: {
+            "enabled": config["enabled"],
+            "features": dict(config["features"]),
+        }
+        for modulo, config in PORTAL_PERMISSION_DEFAULTS.items()
+    }
+
+    if not isinstance(permisos_portal, dict):
+        return base
+
+    for modulo, config in base.items():
+        incoming = permisos_portal.get(modulo)
+        if not isinstance(incoming, dict):
+            continue
+
+        enabled = _bool_value(incoming.get("enabled"), config["enabled"])
+        config["enabled"] = enabled
+
+        incoming_features = incoming.get("features") if isinstance(incoming.get("features"), dict) else {}
+        for feature, default_value in config["features"].items():
+            config["features"][feature] = enabled and _bool_value(incoming_features.get(feature), default_value)
+
+        if not enabled:
+            config["features"] = {feature: False for feature in config["features"]}
+
+    return base
+
+
+def _portal_access_for_user(contexto_usuario: dict, usuario_db: dict | None):
+    if contexto_usuario.get("nivel") == "admin_master":
+        return _normalizar_permisos_portal(PORTAL_PERMISSION_DEFAULTS)
+
+    return _normalizar_permisos_portal((usuario_db or {}).get("permisos_portal"))
+
+
+def _claims_from_contexto(
+    contexto_usuario: dict,
+    permisos: dict | None = None,
+    portal_access: dict | None = None,
+    usuario_db: dict | None = None,
+):
     permisos = permisos or {}
     rol = contexto_usuario["nivel"]
     id_empresa = contexto_usuario["id_raiz"]
@@ -204,13 +281,16 @@ def _claims_from_contexto(contexto_usuario: dict, permisos: dict | None = None):
         "id_sucursal": contexto_usuario["id_sucursal"],
         "id_vendedor": contexto_usuario["id_vendedor"],
         "permisos": permisos,
+        "portal_access": portal_access or _normalizar_permisos_portal(None),
+        "nombre": (usuario_db or {}).get("nombre"),
+        "username": (usuario_db or {}).get("username"),
     }
 
 
 def _obtener_usuario_auth_por_id(id_usuario: str):
     respuesta = (
         supabase.table("usuarios")
-        .select("id,email,password_hash,activo")
+        .select("id,nombre,username,email,password_hash,activo,permisos_portal")
         .eq("id", id_usuario)
         .limit(1)
         .execute()
@@ -222,19 +302,34 @@ def _obtener_usuario_auth_por_id(id_usuario: str):
     return respuesta.data[0]
 
 
-def _obtener_usuario_auth_por_correo(correo: str):
-    respuesta = (
+def _obtener_usuario_auth_por_credencial(credencial: str, not_found_detail: str = "No se pudo restablecer la contrasena"):
+    login_value = (credencial or "").strip()
+    if not login_value:
+        raise HTTPException(status_code=401, detail=not_found_detail)
+
+    respuesta_username = (
         supabase.table("usuarios")
-        .select("id,email,password_hash,activo")
-        .eq("email", correo)
+        .select("id,nombre,username,email,password_hash,activo,permisos_portal")
+        .eq("username", login_value.lower())
         .limit(1)
         .execute()
     )
 
-    if not respuesta.data:
-        raise HTTPException(status_code=401, detail="No se pudo restablecer la contrasena")
+    if respuesta_username.data:
+        return respuesta_username.data[0]
 
-    return respuesta.data[0]
+    respuesta_email = (
+        supabase.table("usuarios")
+        .select("id,nombre,username,email,password_hash,activo,permisos_portal")
+        .eq("email", login_value.lower())
+        .limit(1)
+        .execute()
+    )
+
+    if not respuesta_email.data:
+        raise HTTPException(status_code=401, detail=not_found_detail)
+
+    return respuesta_email.data[0]
 
 
 def _hashear_password(password: str) -> str:
@@ -427,18 +522,8 @@ async def login(
         
         # 1️⃣ Buscar usuario por correo
         print("ANTES DEL SELECT")
-        respuesta = (
-            supabase.table("usuarios")
-            .select("*")
-            .eq("email", correo)
-            .execute()
-        )
+        usuario = _obtener_usuario_auth_por_credencial(correo, not_found_detail="Credenciales incorrectas")
         print("DESPUÉS DEL SELECT")
-
-        if not respuesta.data:
-            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-
-        usuario = respuesta.data[0]
 
         # 2️⃣ Verificar activo
         if not usuario.get("activo"):
@@ -468,9 +553,10 @@ async def login(
 
         # 🔥 NUEVO: obtener permisos si es vendedor
         permisos = _obtener_permisos_vendedor(contexto_usuario)
+        portal_access = _portal_access_for_user(contexto_usuario, usuario)
 
         # 6️⃣ Crear tokens con contexto REAL + permisos
-        access_token = crear_access_token(_claims_from_contexto(contexto_usuario, permisos))
+        access_token = crear_access_token(_claims_from_contexto(contexto_usuario, permisos, portal_access, usuario))
 
         refresh_token = crear_refresh_token({
             "id_usuario": contexto_usuario["id_usuario"]
@@ -534,6 +620,9 @@ def seleccionar_empresa(
             id_sucursal = vendedor.data[0]["id_sucursal"]
             permisos = vendedor.data[0].get("permisos", {}) or {}
 
+    usuario_db = _obtener_usuario_auth_por_id(usuario["id_usuario"])
+    portal_access = _portal_access_for_user({"nivel": rol}, usuario_db)
+
     access_token = crear_access_token({
         "sub": usuario["id_usuario"],
         "id_usuario": usuario["id_usuario"],
@@ -541,7 +630,10 @@ def seleccionar_empresa(
         "rol": rol,
         "id_sucursal": id_sucursal,
         "id_vendedor": id_vendedor,
-        "permisos": permisos
+        "permisos": permisos,
+        "portal_access": portal_access,
+        "nombre": usuario_db.get("nombre"),
+        "username": usuario_db.get("username"),
     })
 
     refresh_token = crear_refresh_token({
@@ -572,7 +664,9 @@ def refresh_token(data: RefreshData):
 
     contexto_usuario = _obtener_contexto_por_usuario(id_usuario)
     permisos = _obtener_permisos_vendedor(contexto_usuario)
-    nuevo_access = crear_access_token(_claims_from_contexto(contexto_usuario, permisos))
+    usuario_db = _obtener_usuario_auth_por_id(id_usuario)
+    portal_access = _portal_access_for_user(contexto_usuario, usuario_db)
+    nuevo_access = crear_access_token(_claims_from_contexto(contexto_usuario, permisos, portal_access, usuario_db))
 
     return {
         "access_token": nuevo_access,
@@ -763,7 +857,7 @@ def restablecer_password(datos: RestablecerPasswordData):
         raise HTTPException(status_code=400, detail="La nueva contrasena debe tener al menos 6 caracteres")
 
     payload = verificar_recovery_token(codigo_recuperacion)
-    usuario_db = _obtener_usuario_auth_por_correo(correo)
+    usuario_db = _obtener_usuario_auth_por_credencial(correo)
 
     if payload.get("id_usuario") != usuario_db.get("id") or payload.get("email") != usuario_db.get("email"):
         raise HTTPException(status_code=401, detail="Codigo de recuperacion invalido")

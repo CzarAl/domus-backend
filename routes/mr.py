@@ -219,6 +219,61 @@ def _verificar_password_confirmacion(usuario: dict, password_confirmacion: Optio
         raise HTTPException(401, "Contraseña de confirmacion incorrecta")
 
 
+def _mr_access(usuario: dict) -> dict:
+    if usuario.get("nivel_global") == "admin_master" or usuario.get("rol") == "admin_master":
+        return {
+            "enabled": True,
+            "features": {
+                "expedientes": True,
+                "pendientes": True,
+                "actividades": True,
+                "alertas": True,
+                "pagos": True,
+            },
+        }
+
+    portal_access = usuario.get("portal_access") if isinstance(usuario.get("portal_access"), dict) else {}
+    mr_access = portal_access.get("mr") if isinstance(portal_access.get("mr"), dict) else None
+
+    if not mr_access:
+        return {
+            "enabled": True,
+            "features": {
+                "expedientes": True,
+                "pendientes": True,
+                "actividades": True,
+                "alertas": True,
+                "pagos": True,
+            },
+        }
+
+    features = mr_access.get("features") if isinstance(mr_access.get("features"), dict) else {}
+    return {
+        "enabled": _to_bool(mr_access.get("enabled"), default=True),
+        "features": {
+            "expedientes": _to_bool(features.get("expedientes"), default=True),
+            "pendientes": _to_bool(features.get("pendientes"), default=True),
+            "actividades": _to_bool(features.get("actividades"), default=True),
+            "alertas": _to_bool(features.get("alertas"), default=True),
+            "pagos": _to_bool(features.get("pagos"), default=True),
+        },
+    }
+
+
+def _require_mr_module(usuario: dict):
+    access = _mr_access(usuario)
+    if not access.get("enabled"):
+        raise HTTPException(403, "No tienes acceso al modulo M&R Abogados")
+    return access
+
+
+def _require_mr_feature(usuario: dict, feature: str):
+    access = _require_mr_module(usuario)
+    if not access.get("features", {}).get(feature, False):
+        raise HTTPException(403, "No tienes permiso para esa funcion de M&R Abogados")
+    return access
+
+
 def _normalizar_pendiente_payload(payload: dict, parcial: bool = False):
     data = dict(payload or {})
     data = _clean_optional_fields(
@@ -347,6 +402,7 @@ def _normalizar_expediente_payload(payload: dict, parcial: bool = False):
 
 @router.get("/juzgados")
 def listar_juzgados(usuario: dict = Depends(get_current_user)):
+    _require_mr_module(usuario)
     personalizados = _listar_juzgados_personalizados()
     labels = list(JUZGADOS_MR)
     for row in personalizados:
@@ -358,6 +414,7 @@ def listar_juzgados(usuario: dict = Depends(get_current_user)):
 
 @router.post("/juzgados")
 def crear_juzgado(payload: dict, usuario: dict = Depends(get_current_user)):
+    _require_mr_module(usuario)
     ciudad = re.sub(r"\s+", " ", str((payload or {}).get("ciudad") or "").strip())
     distrito_judicial = re.sub(r"\s+", " ", str((payload or {}).get("distrito_judicial") or "").strip())
     nombre_juzgado = re.sub(r"\s+", " ", str((payload or {}).get("nombre_juzgado") or "").strip())
@@ -397,6 +454,7 @@ def listar_expedientes(
     estado: Optional[str] = None,
     usuario: dict = Depends(get_current_user),
 ):
+    _require_mr_feature(usuario, "expedientes")
     query = supabase.table("mr_expedientes").select("*")
     if q:
         query = query.ilike("expediente", f"%{q}%")
@@ -412,6 +470,7 @@ def listar_expedientes(
 
 @router.post("/expedientes")
 def crear_expediente(payload: dict, usuario: dict = Depends(get_current_user)):
+    _require_mr_feature(usuario, "expedientes")
     payload = _normalizar_expediente_payload(payload, parcial=False)
     res = supabase.table("mr_expedientes").insert(payload).execute()
     data = _normalizar_registros_juzgado(res.data or [])
@@ -420,6 +479,7 @@ def crear_expediente(payload: dict, usuario: dict = Depends(get_current_user)):
 
 @router.patch("/expedientes/{expediente_id}")
 def actualizar_expediente(expediente_id: str, payload: dict, usuario: dict = Depends(get_current_user)):
+    _require_mr_feature(usuario, "expedientes")
     data = dict(payload or {})
     password_confirmacion = data.pop("password_confirmacion", None)
     confirmacion_cambios = _to_bool(data.pop("confirmacion_cambios", False), default=False)
@@ -442,6 +502,7 @@ def actualizar_expediente(expediente_id: str, payload: dict, usuario: dict = Dep
 
 @router.get("/alertas")
 def alertas(usuario: dict = Depends(get_current_user)):
+    _require_mr_feature(usuario, "alertas")
     try:
         data = supabase.table("mr_alertas_proximas").select("*").order("fecha_vencimiento").execute().data
     except Exception:
@@ -458,6 +519,7 @@ def alertas(usuario: dict = Depends(get_current_user)):
 
 @router.get("/pendientes")
 def listar_pendientes(expediente: Optional[str] = None, usuario: dict = Depends(get_current_user)):
+    _require_mr_feature(usuario, "pendientes")
     query = supabase.table("mr_pendientes").select("*")
     if expediente:
         query = query.ilike("expediente", f"%{expediente}%")
@@ -467,6 +529,7 @@ def listar_pendientes(expediente: Optional[str] = None, usuario: dict = Depends(
 
 @router.post("/pendientes")
 def crear_pendiente(payload: dict, usuario: dict = Depends(get_current_user)):
+    _require_mr_feature(usuario, "pendientes")
     payload = _normalizar_pendiente_payload(payload, parcial=False)
     data = _mr_rest_write(MR_PENDIENTES_URL, "POST", payload)
     return {"pendiente": data[0] if data else None}
@@ -474,6 +537,7 @@ def crear_pendiente(payload: dict, usuario: dict = Depends(get_current_user)):
 
 @router.patch("/pendientes/{pendiente_id}")
 def actualizar_pendiente(pendiente_id: str, payload: dict, usuario: dict = Depends(get_current_user)):
+    _require_mr_feature(usuario, "pendientes")
     payload = _normalizar_pendiente_payload(payload, parcial=True)
     if not payload:
         raise HTTPException(400, "Nada por actualizar")
@@ -483,6 +547,7 @@ def actualizar_pendiente(pendiente_id: str, payload: dict, usuario: dict = Depen
 
 @router.delete("/pendientes/{pendiente_id}")
 def eliminar_pendiente(pendiente_id: str, usuario: dict = Depends(get_current_user)):
+    _require_mr_feature(usuario, "pendientes")
     data = _mr_rest_write(MR_PENDIENTES_URL, "DELETE", None, pendiente_id)
     return {"pendiente": data[0] if data else None}
 
@@ -494,6 +559,7 @@ def listar_actividades(
     tipo: Optional[str] = None,
     usuario: dict = Depends(get_current_user),
 ):
+    _require_mr_feature(usuario, "actividades")
     try:
         query = supabase.table("mr_actividades").select("*")
         if expediente:
@@ -510,6 +576,7 @@ def listar_actividades(
 
 @router.post("/actividades")
 def crear_actividad(payload: dict, usuario: dict = Depends(get_current_user)):
+    _require_mr_feature(usuario, "actividades")
     payload = _normalizar_actividad_payload(payload, parcial=False)
     data = _mr_rest_write(MR_ACTIVIDADES_URL, "POST", payload)
     return {"actividad": data[0] if data else None}
@@ -517,6 +584,7 @@ def crear_actividad(payload: dict, usuario: dict = Depends(get_current_user)):
 
 @router.patch("/actividades/{actividad_id}")
 def actualizar_actividad(actividad_id: str, payload: dict, usuario: dict = Depends(get_current_user)):
+    _require_mr_feature(usuario, "actividades")
     payload = _normalizar_actividad_payload(payload, parcial=True)
     if not payload:
         raise HTTPException(400, "Nada por actualizar")
@@ -526,12 +594,14 @@ def actualizar_actividad(actividad_id: str, payload: dict, usuario: dict = Depen
 
 @router.delete("/actividades/{actividad_id}")
 def eliminar_actividad(actividad_id: str, usuario: dict = Depends(get_current_user)):
+    _require_mr_feature(usuario, "actividades")
     data = _mr_rest_write(MR_ACTIVIDADES_URL, "DELETE", None, actividad_id)
     return {"actividad": data[0] if data else None}
 
 
 @router.get("/pagos")
 def listar_pagos(expediente: Optional[str] = None, juzgado: Optional[str] = None, usuario: dict = Depends(get_current_user)):
+    _require_mr_feature(usuario, "pagos")
     query = supabase.table("pagos_expedientes").select("*")
     if expediente:
         query = query.ilike("expediente", f"%{expediente}%")
@@ -543,6 +613,7 @@ def listar_pagos(expediente: Optional[str] = None, juzgado: Optional[str] = None
 
 @router.post("/pagos")
 def crear_pago(payload: dict, usuario: dict = Depends(get_current_user)):
+    _require_mr_feature(usuario, "pagos")
     for campo in ["expediente", "juzgado", "monto"]:
         if not payload.get(campo):
             raise HTTPException(400, f"Falta {campo}")
