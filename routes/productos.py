@@ -1,16 +1,27 @@
 from datetime import datetime
+import json
 import os
 import re
+import time
 import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+import jwt
 
 from database import supabase
 from dependencies import get_current_user
 
 router = APIRouter(prefix="/productos", tags=["Productos"])
+
+GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
+GOOGLE_DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 
 
 class ProductoCreate(BaseModel):
@@ -133,6 +144,114 @@ def _try_update_producto(id_producto: str, id_empresa: str, payloads: list[dict]
     raise HTTPException(status_code=400, detail=last_error or "No se pudo actualizar producto")
 
 
+def _drive_private_key() -> str:
+    return (os.getenv("GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY") or "").replace("\\n", "\n").strip()
+
+
+def _drive_config(folder_id_override: str | None = None) -> dict:
+    folder_id = (folder_id_override or os.getenv("GOOGLE_DRIVE_FOLDER_ID") or "").strip()
+    client_email = (os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL") or "").strip()
+    private_key = _drive_private_key()
+
+    if not client_email or not private_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Faltan GOOGLE_SERVICE_ACCOUNT_EMAIL o GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY en el backend",
+        )
+
+    if not folder_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Falta GOOGLE_DRIVE_FOLDER_ID o captura manualmente el ID de la carpeta de Drive",
+        )
+
+    return {
+        "folder_id": folder_id,
+        "client_email": client_email,
+        "private_key": private_key,
+    }
+
+
+def _drive_access_token(config: dict) -> str:
+    now = int(time.time())
+    assertion = jwt.encode(
+        {
+            "iss": config["client_email"],
+            "scope": GOOGLE_DRIVE_SCOPE,
+            "aud": GOOGLE_OAUTH_TOKEN_URL,
+            "exp": now + 3600,
+            "iat": now,
+        },
+        config["private_key"],
+        algorithm="RS256",
+    )
+
+    body = urllib.parse.urlencode({
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": assertion,
+    }).encode("utf-8")
+
+    request = urllib.request.Request(
+        GOOGLE_OAUTH_TOKEN_URL,
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=400, detail=f"No se pudo autenticar con Google Drive: {detail or exc.reason}")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo autenticar con Google Drive: {exc}")
+
+    access_token = payload.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Google no devolvio access_token para Drive")
+    return access_token
+
+
+def _drive_list_children(folder_id: str, access_token: str) -> list[dict]:
+    params = urllib.parse.urlencode({
+        "q": f"'{folder_id}' in parents and trashed = false",
+        "fields": "files(id,name,mimeType,modifiedTime,size,webViewLink)",
+        "orderBy": "folder,name_natural",
+        "pageSize": "200",
+        "supportsAllDrives": "true",
+        "includeItemsFromAllDrives": "true",
+    })
+
+    request = urllib.request.Request(
+        f"{GOOGLE_DRIVE_FILES_URL}?{params}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=400, detail=f"No se pudo listar la carpeta de Drive: {detail or exc.reason}")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo listar la carpeta de Drive: {exc}")
+
+    return payload.get("files") or []
+
+
+def _format_drive_file(item: dict) -> dict:
+    return {
+        "id": item.get("id"),
+        "name": item.get("name") or "Sin nombre",
+        "mimeType": item.get("mimeType") or "application/octet-stream",
+        "modifiedTime": item.get("modifiedTime"),
+        "size": item.get("size"),
+        "webViewLink": item.get("webViewLink"),
+    }
+
+
 @router.get("/")
 def listar_productos(usuario=Depends(get_current_user)):
     id_empresa = _id_empresa(usuario)
@@ -146,6 +265,29 @@ def listar_productos(usuario=Depends(get_current_user)):
     )
 
     return [_normalizar_producto(p) for p in (resp.data or [])]
+
+
+@router.get("/drive/preview")
+def vista_previa_drive(folder_id: str | None = Query(default=None), _usuario=Depends(get_current_user)):
+    config = _drive_config(folder_id)
+    access_token = _drive_access_token(config)
+    archivos = [_format_drive_file(item) for item in _drive_list_children(config["folder_id"], access_token)]
+
+    categorias = [
+        {"id": item["id"], "nombre": item["name"]}
+        for item in archivos
+        if item["mimeType"] == GOOGLE_DRIVE_FOLDER_MIME
+    ]
+    archivos_raiz = [item for item in archivos if item["mimeType"] != GOOGLE_DRIVE_FOLDER_MIME]
+
+    return {
+        "folder_id": config["folder_id"],
+        "service_account_email": config["client_email"],
+        "total_elementos": len(archivos),
+        "categorias": categorias,
+        "archivos_raiz": archivos_raiz,
+        "mensaje": "Comparte la carpeta de Drive con este correo de servicio para que el backend pueda leerla.",
+    }
 
 
 @router.get("/{id_producto}")
