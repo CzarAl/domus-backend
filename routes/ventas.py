@@ -501,3 +501,4 @@ def crear_venta_nueva(datos: VentaNueva, usuario=Depends(get_current_user)):
         "generar_pdf": datos.generar_pdf,
         "comprobante": comprobante,
     }
+

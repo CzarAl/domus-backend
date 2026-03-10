@@ -32,6 +32,7 @@ from routes import empresas
 from routes import pagos
 from routes import admin_cargos
 from routes import empresa_finanzas
+from routes import mr
 
 
 import os
@@ -46,6 +47,9 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM")
 
 app = FastAPI()
+
+# Routers
+app.include_router(mr.router)
 
 # =================================
 # MIDDLEWARE AUDITORÍA BLOQUEO
@@ -102,11 +106,13 @@ cors_origins = [
     for origin in (os.getenv("CORS_ORIGINS") or "").split(",")
     if origin.strip()
 ]
+cors_origin_regex = (os.getenv("CORS_ORIGIN_REGEX") or "").strip() or None
 
-if cors_origins:
+if cors_origins or cors_origin_regex:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
+        allow_origin_regex=cors_origin_regex,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -676,6 +682,8 @@ def cambiar_password(
         .execute()
 
     return {"mensaje": "Contraseña actualizada correctamente"}
+
+
 
 
 
