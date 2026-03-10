@@ -1,4 +1,5 @@
 from datetime import datetime
+import os
 import re
 import unicodedata
 import uuid
@@ -47,7 +48,15 @@ class ProductoUpdate(BaseModel):
     stock_inicial: int | None = Field(default=None, ge=0)
 
 
+def _storefront_empresa_id() -> str:
+    return (os.getenv("STOREFRONT_EMPRESA_ID") or os.getenv("PUBLIC_STOREFRONT_EMPRESA_ID") or "").strip()
+
+
 def _id_empresa(usuario: dict) -> str:
+    storefront_empresa = _storefront_empresa_id()
+    if storefront_empresa:
+        return storefront_empresa
+
     id_empresa = usuario.get("id_raiz")
     if not id_empresa:
         raise HTTPException(status_code=400, detail="Usuario sin empresa")
@@ -323,15 +332,17 @@ def actualizar_producto(id_producto: str, datos: ProductoUpdate, usuario=Depends
 def eliminar_producto(id_producto: str, usuario=Depends(get_current_user)):
     id_empresa = _id_empresa(usuario)
 
-    resp = (
+    existing = (
         supabase.table("productos")
-        .delete()
+        .select("id")
         .eq("id", id_producto)
         .eq("id_empresa", id_empresa)
+        .limit(1)
         .execute()
     )
 
-    if not resp.data:
+    if not existing.data:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
 
-    return {"mensaje": "Producto eliminado"}
+    supabase.table("productos").delete().eq("id", id_producto).eq("id_empresa", id_empresa).execute()
+    return {"mensaje": "Producto eliminado", "id": id_producto}
