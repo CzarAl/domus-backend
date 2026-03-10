@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Literal
 import bcrypt
 import uuid
+import re
 
 router = APIRouter(prefix="/admin", tags=["Admin SaaS"])
 
@@ -25,6 +26,35 @@ def _slug_text(texto: str) -> str:
     limpio = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in texto)
     limpio = limpio.strip("_")
     return limpio or "backup"
+
+
+def _normalize_username(texto: str) -> str:
+    value = (texto or "").strip().lower()
+    if not value:
+        raise HTTPException(status_code=400, detail="Debes capturar un usuario o correo")
+
+    if "@" in value:
+        return value
+
+    value = re.sub(r"[^a-z0-9._-]+", "", value)
+    return value or "usuario"
+
+
+def _email_for_username(username: str, email: str | None = None) -> str:
+    explicit = (email or "").strip().lower()
+    if explicit:
+        return explicit
+    if "@" in username:
+        return username
+    return f"{username}@local.domus"
+
+
+def _usuario_response_data(usuario_data: dict, asignaciones: list[dict], permisos_portal: dict):
+    return {
+        **usuario_data,
+        "permisos_portal": permisos_portal,
+        "asignaciones": asignaciones,
+    }
 
 
 PORTAL_PERMISSION_DEFAULTS = {
@@ -103,7 +133,7 @@ def _normalizar_permisos_portal(permisos_portal, nivel_global: str):
 
 class UsuarioCrearAdmin(BaseModel):
     nombre: str = Field(min_length=2, max_length=120)
-    username: str = Field(min_length=3, max_length=40)
+    username: str = Field(min_length=3, max_length=120)
     password: str = Field(min_length=6)
     email: EmailStr | None = None
     nivel_global: Literal["admin_master", "usuario", "vendedor"] = "usuario"
@@ -116,7 +146,7 @@ class UsuarioCrearAdmin(BaseModel):
 
 class UsuarioActualizarAdmin(BaseModel):
     nombre: str = Field(min_length=2, max_length=120)
-    username: str = Field(min_length=3, max_length=40)
+    username: str = Field(min_length=3, max_length=120)
     email: EmailStr | None = None
     nivel_global: Literal["admin_master", "usuario", "vendedor"] | None = None
     id_empresa: str | None = None
@@ -130,7 +160,8 @@ class UsuarioEstadoUpdate(BaseModel):
 
 class UsuarioEliminarAdmin(BaseModel):
     password_confirmacion: str
-    nombre_backup: str = Field(min_length=3, max_length=80)
+    guardar_backup: bool = True
+    nombre_backup: str | None = Field(default=None, min_length=3, max_length=80)
 
 
 @router.get("/empresas")
@@ -221,9 +252,9 @@ def crear_usuario_admin(datos: UsuarioCrearAdmin, usuario=Depends(get_current_us
     if datos.nivel_global == "vendedor" and not datos.id_sucursal:
         raise HTTPException(status_code=400, detail="Debes seleccionar sucursal para vendedor")
 
-    username = _slug_text(datos.username.strip().lower())
+    username = _normalize_username(datos.username)
     nombre = datos.nombre.strip()
-    email = (datos.email or f"{username}@local.domus").strip().lower()
+    email = _email_for_username(username, datos.email)
 
     existe_email = (
         supabase.table("usuarios")
@@ -275,6 +306,7 @@ def crear_usuario_admin(datos: UsuarioCrearAdmin, usuario=Depends(get_current_us
     if not nuevo_usuario.data:
         raise HTTPException(status_code=400, detail="No se pudo crear usuario")
 
+    asignaciones_response = []
     if datos.id_empresa:
         rol_empresa = datos.rol_empresa or datos.nivel_global
 
@@ -296,6 +328,22 @@ def crear_usuario_admin(datos: UsuarioCrearAdmin, usuario=Depends(get_current_us
 
         if not relacion.data:
             raise HTTPException(status_code=400, detail="No se pudo asignar el usuario a la empresa")
+
+        empresa_nombre = None
+        try:
+            empresa_resp = supabase.table("empresas").select("nombre").eq("id", datos.id_empresa).limit(1).execute()
+            if empresa_resp.data:
+                empresa_nombre = empresa_resp.data[0].get("nombre")
+        except Exception:
+            empresa_nombre = None
+
+        asignaciones_response = [{
+            "id": relacion.data[0].get("id"),
+            "id_empresa": datos.id_empresa,
+            "empresa_nombre": empresa_nombre or "-",
+            "rol": rol_empresa,
+            "activo": True,
+        }]
 
     if datos.nivel_global == "vendedor" and datos.id_empresa and datos.id_sucursal:
         try:
@@ -328,7 +376,7 @@ def crear_usuario_admin(datos: UsuarioCrearAdmin, usuario=Depends(get_current_us
         if not vendedor.data:
             raise HTTPException(status_code=400, detail="Se creó usuario, pero falló crear vendedor")
 
-    return {"mensaje": "Usuario creado correctamente", "id_usuario": id_usuario}
+    return {"mensaje": "Usuario creado correctamente", "id_usuario": id_usuario, "usuario": _usuario_response_data(nuevo_usuario.data[0], asignaciones_response, permisos_portal)}
 
 
 @router.patch("/usuarios/{id_usuario}")
@@ -351,8 +399,8 @@ def actualizar_usuario_admin(
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
     actual = actual_resp.data[0]
-    username = _slug_text(datos.username.strip().lower())
-    email = (datos.email or actual.get("email") or f"{username}@local.domus").strip().lower()
+    username = _normalize_username(datos.username)
+    email = _email_for_username(username, datos.email or actual.get("email"))
     nivel_global = datos.nivel_global or actual.get("nivel_global") or "usuario"
 
     existe_username = (
@@ -427,7 +475,24 @@ def actualizar_usuario_admin(
                 }
             ).execute()
 
-    return {"mensaje": "Usuario actualizado correctamente", "usuario": usuario_update.data[0] if usuario_update.data else None}
+    asignaciones_response = []
+    if nivel_global != "admin_master" and datos.id_empresa:
+        empresa_nombre = None
+        try:
+            empresa_resp = supabase.table("empresas").select("nombre").eq("id", datos.id_empresa).limit(1).execute()
+            if empresa_resp.data:
+                empresa_nombre = empresa_resp.data[0].get("nombre")
+        except Exception:
+            empresa_nombre = None
+        asignaciones_response = [{
+            "id": rel_resp.data[0].get("id") if rel_resp.data else str(uuid.uuid4()),
+            "id_empresa": datos.id_empresa,
+            "empresa_nombre": empresa_nombre or "-",
+            "rol": rol_empresa,
+            "activo": True,
+        }]
+
+    return {"mensaje": "Usuario actualizado correctamente", "usuario": _usuario_response_data(usuario_update.data[0] if usuario_update.data else {}, asignaciones_response, permisos_portal)}
 
 
 @router.patch("/usuarios/{id_usuario}/estado")
@@ -516,36 +581,42 @@ def eliminar_usuario_admin(
         .execute()
     ).data or []
 
-    backup_payload = {
-        "tipo_respaldo": "usuario",
-        "nombre_respaldo": datos.nombre_backup,
-        "generado_por": usuario.get("id_usuario"),
-        "fecha": datetime.utcnow().isoformat(),
-        "usuario": usuario_data,
-        "usuarios_empresas": usuarios_empresas,
-        "vendedores": vendedores,
-    }
+    backup_id = None
+    if datos.guardar_backup:
+        nombre_backup = (datos.nombre_backup or f"backup-{usuario_data.get('username') or usuario_data.get('email') or 'usuario'}").strip()
+        if not nombre_backup:
+            raise HTTPException(status_code=400, detail="Captura un nombre para el backup o desactiva el respaldo")
 
-    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    backup_name = _slug_text(datos.nombre_backup)
+        backup_payload = {
+            "tipo_respaldo": "usuario",
+            "nombre_respaldo": nombre_backup,
+            "generado_por": usuario.get("id_usuario"),
+            "fecha": datetime.utcnow().isoformat(),
+            "usuario": usuario_data,
+            "usuarios_empresas": usuarios_empresas,
+            "vendedores": vendedores,
+        }
 
-    respaldo = (
-        supabase.table("empresas_backup")
-        .insert(
-            {
-                "id_empresa_original": id_usuario,
-                "nombre_empresa": f"USUARIO::{datos.nombre_backup}",
-                "nombre_archivo": f"{backup_name}_{stamp}.json",
-                "datos": backup_payload,
-            }
+        stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        backup_name = _slug_text(nombre_backup)
+
+        respaldo = (
+            supabase.table("empresas_backup")
+            .insert(
+                {
+                    "id_empresa_original": id_usuario,
+                    "nombre_empresa": f"USUARIO::{nombre_backup}",
+                    "nombre_archivo": f"{backup_name}_{stamp}.json",
+                    "datos": backup_payload,
+                }
+            )
+            .execute()
         )
-        .execute()
-    )
 
-    if not respaldo.data:
-        raise HTTPException(status_code=500, detail="No se pudo guardar respaldo del usuario")
+        if not respaldo.data:
+            raise HTTPException(status_code=500, detail="No se pudo guardar respaldo del usuario")
 
-    backup_id = respaldo.data[0].get("id")
+        backup_id = respaldo.data[0].get("id")
 
     # Si el usuario era vendedor, se desvincula de vendedor para no romper ventas históricas.
     supabase.table("vendedores").update({"id_usuario": None, "activo": False}).eq("id_usuario", id_usuario).execute()
@@ -557,7 +628,7 @@ def eliminar_usuario_admin(
         raise HTTPException(status_code=500, detail="Usuario respaldado pero no se pudo eliminar")
 
     return {
-        "mensaje": "Usuario eliminado y respaldado correctamente",
+        "mensaje": "Usuario eliminado y respaldado correctamente" if backup_id else "Usuario eliminado correctamente",
         "backup_id": backup_id,
     }
 
