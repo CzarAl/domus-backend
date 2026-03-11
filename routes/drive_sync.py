@@ -660,8 +660,12 @@ def _normalize_code_candidate(raw: str) -> str | None:
     cleaned = re.sub(r"[^A-Z0-9]+", "-", cleaned)
     cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-")
     parts = [part for part in cleaned.split("-") if part]
-    if len(parts) == 1 and re.fullmatch(r"[A-Z]{2,6}\d{2,4}", parts[0]):
+    if len(parts) == 1 and re.fullmatch(r"[A-Z]{2,6}\d{2,6}", parts[0]):
         return parts[0]
+    if len(parts) == 1 and re.fullmatch(r"\d{4,6}", parts[0]):
+        return parts[0]
+    if len(parts) == 2 and re.fullmatch(r"[A-Z]{1,4}\d{4,6}", parts[0]) and re.fullmatch(r"[A-Z0-9]{2,12}", parts[1]):
+        return "-".join(parts[:2])
     if len(parts) < 3:
         return None
     if re.fullmatch(r"[A-Z]{1,5}", parts[0]) and re.fullmatch(r"\d{2,5}", parts[1]) and re.fullmatch(r"[A-Z0-9]{2,12}", parts[2]):
@@ -680,7 +684,9 @@ def _extract_code_candidates(text: str) -> list[str]:
         r"\b[A-Z]{1,5}\d{2,5}\s*[- ]\s*[A-Z0-9]{2,12}\b",
         r"\b\d{2,5}\s*[- ]\s*[A-Z0-9]{1,5}\s*[- ]\s*[A-Z0-9]{1,5}\s*[- ]\s*[A-Z0-9]{1,5}\b",
         r"\b\d{2,5}\s+[A-Z0-9]{1,5}\s+\d{2,5}\s+\d{2,5}\b",
-        r"\b[A-Z]{2,6}\d{2,4}\b",
+        r"\b[A-Z]{2,6}\d{2,6}\b",
+        r"\b\d{4,6}\b",
+        r"\b[A-Z]{1,4}\d{4,6}-[A-Z0-9]{2,12}\b",
     ]
     found = []
     seen = set()
