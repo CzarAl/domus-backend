@@ -655,6 +655,42 @@ def _extract_money_values(text: str) -> list[float]:
     return deduped
 
 
+def _normalize_code_candidate(raw: str) -> str | None:
+    cleaned = (raw or "").upper()
+    cleaned = re.sub(r"[^A-Z0-9]+", "-", cleaned)
+    cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-")
+    parts = [part for part in cleaned.split("-") if part]
+    if len(parts) < 3:
+        return None
+    if not re.fullmatch(r"[A-Z]{1,5}", parts[0]):
+        return None
+    if not re.fullmatch(r"\d{2,5}", parts[1]):
+        return None
+    if not re.fullmatch(r"[A-Z0-9]{2,12}", parts[2]):
+        return None
+    return "-".join(parts[:3])
+
+
+def _extract_code_candidates(text: str) -> list[str]:
+    if not text:
+        return []
+    patterns = [
+        r"\b[A-Z]{1,5}\s*[- ]\s*\d{2,5}\s*[- ]\s*[A-Z0-9]{2,12}\b",
+        r"\b[A-Z]{1,5}-\d{2,5}[A-Z0-9]{2,12}\b",
+        r"\b[A-Z]{1,5}\d{2,5}\s*[- ]\s*[A-Z0-9]{2,12}\b",
+    ]
+    found = []
+    seen = set()
+    for pattern in patterns:
+        for raw in re.findall(pattern, (text or "").upper()):
+            normalized = _normalize_code_candidate(raw)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            found.append(normalized)
+    return found
+
+
 def _pick_cost_from_context(lines: list[str], index: int) -> float | None:
     window = " ".join(lines[max(0, index - 1): min(len(lines), index + 3)])
     tagged = re.findall(r"(?:costo|distribuidor|precio|p\.\s*distribuidor)[^0-9$]{0,8}\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})?)", window, flags=re.IGNORECASE)
@@ -674,7 +710,9 @@ def _extract_cost_rows_from_text(raw_text: str, filename: str) -> list[dict]:
     lines = [line for line in lines if line]
     results = {}
     for index, line in enumerate(lines):
-        codes = re.findall(r"\b[A-Z]{1,5}-\d{2,5}-[A-Z0-9]{2,12}\b", line.upper())
+        codes = _extract_code_candidates(line)
+        if not codes and index + 1 < len(lines):
+            codes = _extract_code_candidates(f"{line} {lines[index + 1]}")
         if not codes:
             continue
         cost = _pick_cost_from_context(lines, index)
