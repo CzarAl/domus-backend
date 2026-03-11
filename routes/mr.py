@@ -1,14 +1,26 @@
+import base64
+import json
+import os
 import re
 import unicodedata
+import urllib.error
+import urllib.request
 from datetime import date, datetime
 from typing import Optional
 
 import bcrypt
 import requests
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from database import SUPABASE_KEY, SUPABASE_URL, supabase
 from dependencies import get_current_user
+from routes.drive_sync import (
+    GOOGLE_VISION_SCOPE,
+    _google_access_token,
+    _google_service_config,
+    _vision_enabled,
+    _vision_parent,
+)
 
 router = APIRouter(prefix="/mr", tags=["MR Abogados"])
 
@@ -444,6 +456,204 @@ def _normalizar_expediente_payload(payload: dict, parcial: bool = False):
             pass
 
     return data
+
+
+def _vision_image_endpoint(parent: str | None) -> str:
+    location = (os.getenv("GOOGLE_VISION_LOCATION") or "us").strip()
+    if not parent:
+        return "https://vision.googleapis.com/v1/images:annotate"
+    return f"https://{location}-vision.googleapis.com/v1/{parent}/images:annotate"
+
+
+def _vision_ocr_image(file_bytes: bytes, filename: str) -> str:
+    if not _vision_enabled():
+        return ""
+
+    config = _google_service_config()
+    access_token = _google_access_token(config, [GOOGLE_VISION_SCOPE], "Google Vision")
+    payload = {
+        "requests": [
+            {
+                "image": {"content": base64.b64encode(file_bytes).decode("utf-8")},
+                "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
+                "imageContext": {"languageHints": ["es", "en"]},
+            }
+        ]
+    }
+
+    request = urllib.request.Request(
+        _vision_image_endpoint(_vision_parent()),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=400, detail=f"No se pudo ejecutar OCR con Google Vision para {filename}: {detail or exc.reason}")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"No se pudo ejecutar OCR con Google Vision para {filename}: {exc}")
+
+    responses = response_payload.get("responses") or []
+    first = responses[0] if responses else {}
+    if first.get("error", {}).get("message"):
+        raise HTTPException(status_code=400, detail=f"OCR error en {filename}: {first['error']['message']}")
+
+    text_value = ((first.get("fullTextAnnotation") or {}).get("text") or "").strip()
+    if text_value:
+        return text_value
+
+    text_annotations = first.get("textAnnotations") or []
+    if text_annotations:
+        return (text_annotations[0].get("description") or "").strip()
+
+    return ""
+
+
+def _extract_payment_amount(text: str) -> float | None:
+    candidates: list[float] = []
+    patterns = [
+        r"(?:importe|monto|cantidad|total|paguese la cantidad de|paguese a favor de)[^$0-9]{0,20}\$?\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+        r"\$\s*([0-9][0-9,]*(?:\.[0-9]{2})?)",
+    ]
+    for pattern in patterns:
+        for raw in re.findall(pattern, text, flags=re.IGNORECASE):
+            try:
+                candidates.append(float(raw.replace(",", "")))
+            except Exception:
+                continue
+    return max(candidates) if candidates else None
+
+
+def _normalize_payment_date(value: str) -> str | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y"):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            return parsed.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
+def _extract_payment_date(text: str) -> str | None:
+    patterns = [
+        r"(?:fecha(?: de oficio)?|oficio)[^0-9]{0,10}(\d{2}[/-]\d{2}[/-]\d{2,4})",
+        r"(\d{2}[/-]\d{2}[/-]\d{2,4})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        normalized = _normalize_payment_date(match.group(1))
+        if normalized:
+            return normalized
+    return None
+
+
+def _extract_payment_expediente(text: str) -> str | None:
+    patterns = [
+        r"(?:expediente|exp\.?|juicio)\s*(?:no\.?|n[uú]m(?:ero)?\.?|:)??\s*([A-Z0-9][A-Z0-9\-/.]{3,40})",
+        r"([A-Z]{1,6}-?\d{1,6}/\d{2,4})",
+    ]
+    normalized_text = _strip_accents(text).upper()
+    for pattern in patterns:
+        match = re.search(pattern, normalized_text, flags=re.IGNORECASE)
+        if match:
+            return re.sub(r"\s+", "", match.group(1).strip())
+    return None
+
+
+def _extract_payment_beneficiary(text: str) -> str | None:
+    patterns = [
+        r"(?:beneficiario|a favor de|a nombre de|paguese a|paguese al C\.)\s*[:.-]?\s*([^\n]{4,120})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            value = re.sub(r"\s+", " ", match.group(1)).strip(" .:-")
+            if value:
+                return value[:140]
+    return None
+
+
+def _extract_payment_concept(text: str) -> str | None:
+    patterns = [
+        r"(?:concepto|por concepto de|descripcion|referencia)\s*[:.-]?\s*([^\n]{4,160})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            value = re.sub(r"\s+", " ", match.group(1)).strip(" .:-")
+            if value:
+                return value[:180]
+    return None
+
+
+def _extract_payment_juzgado(text: str) -> str | None:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    candidates = [line for line in lines if line]
+    candidates.append(re.sub(r"\s+", " ", text).strip())
+    for candidate in candidates:
+        try:
+            return _normalizar_juzgado(candidate, required=False)
+        except HTTPException:
+            continue
+    return None
+
+
+def _extract_payment_data_from_text(text: str) -> dict:
+    compact_text = re.sub(r"\s+", " ", text).strip()
+    extracted = {
+        "expediente": _extract_payment_expediente(text),
+        "juzgado": _extract_payment_juzgado(text),
+        "monto": _extract_payment_amount(compact_text),
+        "fecha_oficio": _extract_payment_date(compact_text),
+        "beneficiario": _extract_payment_beneficiary(text),
+        "concepto": _extract_payment_concept(text),
+    }
+    warnings = []
+    if not extracted["expediente"]:
+        warnings.append("No se detecto expediente con suficiente confianza.")
+    if not extracted["juzgado"]:
+        warnings.append("No se detecto juzgado en la foto.")
+    if extracted["monto"] is None:
+        warnings.append("No se detecto monto claro en la foto.")
+    if not extracted["fecha_oficio"]:
+        warnings.append("No se detecto fecha de oficio.")
+    return {
+        "ocr_preview": compact_text[:1200] or None,
+        "warnings": warnings,
+        "proposed": extracted,
+    }
+
+
+@router.post("/pagos/ocr-imagen")
+async def ocr_pago_imagen(file: UploadFile = File(...), usuario: dict = Depends(get_current_user)):
+    _require_mr_feature(usuario, "pagos")
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(400, "Solo se permiten imagenes para OCR de pagos")
+
+    contenido = await file.read()
+    if not contenido:
+        raise HTTPException(400, "La imagen viene vacia")
+
+    texto_ocr = _vision_ocr_image(contenido, file.filename or "pago.jpg")
+    resultado = _extract_payment_data_from_text(texto_ocr)
+    return {
+        "filename": file.filename,
+        "ocr_preview": resultado["ocr_preview"],
+        "warnings": resultado["warnings"],
+        "proposed": resultado["proposed"],
+    }
 
 
 @router.get("/juzgados")
