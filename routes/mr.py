@@ -624,26 +624,39 @@ def _clean_expediente_candidate(value: str) -> str | None:
     cleaned = cleaned.strip(" :-./")
     if len(cleaned) < 5:
         return None
-    if "/" in cleaned and re.search(r"\d{1,6}/\d{2,4}", cleaned):
-        return cleaned
-    if re.search(r"[A-Z]\d{1,6}/\d{2,4}", cleaned):
-        return cleaned
-    return None
+    if "/" not in cleaned:
+        return None
+    if not re.search(r"\d{1,6}/\d{2,4}", cleaned):
+        return None
+    return cleaned
 
 
 def _extract_payment_expediente(text: str) -> str | None:
     normalized_text = _strip_accents(text).upper()
-    patterns = [
-        r"\bEXPEDIENTE\b\s*[:.-]?\s*([A-Z]?\s*\d{1,6}/\d{2,4})",
-        r"\bEXP\.?\b\s*[:.-]?\s*([A-Z]?\s*\d{1,6}/\d{2,4})",
-        r"\bJUICIO\b\s*[:.-]?\s*([A-Z]?\s*\d{1,6}/\d{2,4})",
-        r"\b([A-Z]?\s*\d{1,6}/\d{2,4})\b",
+
+    strict_patterns = [
+        r"EXPEDIENTE\s*[:.-]?\s*([A-Z]?\s*\d{1,6}/\d{2,4})",
+        r"EXP\.?\s*[:.-]?\s*([A-Z]?\s*\d{1,6}/\d{2,4})",
+        r"JUICIO\s*[:.-]?\s*([A-Z]?\s*\d{1,6}/\d{2,4})",
     ]
-    for pattern in patterns:
+    for pattern in strict_patterns:
         for match in re.finditer(pattern, normalized_text, flags=re.IGNORECASE):
+            cleaned = _clean_expediente_candidate(match.group(1))
+            if cleaned and "OFICIO" not in match.group(0):
+                return cleaned
+
+    for line in normalized_text.splitlines():
+        line_clean = re.sub(r"\s+", " ", line).strip()
+        if not line_clean or "OFICIO" in line_clean:
+            continue
+        if "EXPEDIENTE" not in line_clean and "JUICIO" not in line_clean:
+            continue
+        match = re.search(r"([A-Z]?\s*\d{1,6}/\d{2,4})", line_clean)
+        if match:
             cleaned = _clean_expediente_candidate(match.group(1))
             if cleaned:
                 return cleaned
+
     return None
 
 
