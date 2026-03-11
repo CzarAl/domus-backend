@@ -541,45 +541,122 @@ def _normalize_payment_date(value: str) -> str | None:
             return parsed.strftime("%Y-%m-%d")
         except ValueError:
             continue
+
+    months = {
+        "ene": 1,
+        "enero": 1,
+        "feb": 2,
+        "febrero": 2,
+        "mar": 3,
+        "marzo": 3,
+        "abr": 4,
+        "abril": 4,
+        "may": 5,
+        "mayo": 5,
+        "jun": 6,
+        "junio": 6,
+        "jul": 7,
+        "julio": 7,
+        "ago": 8,
+        "agosto": 8,
+        "sep": 9,
+        "sept": 9,
+        "septiembre": 9,
+        "oct": 10,
+        "octubre": 10,
+        "nov": 11,
+        "noviembre": 11,
+        "dic": 12,
+        "diciembre": 12,
+    }
+    normalized = _strip_accents(raw).lower().replace(",", " ")
+    match = re.search(r"(\d{1,2})\s+de\s+([a-z]+)\s+de\s+(\d{4})", normalized)
+    if not match:
+        match = re.search(r"(\d{1,2})\s+([a-z]{3,})\s+(\d{4})", normalized)
+    if match:
+        day = int(match.group(1))
+        month = months.get(match.group(2)[:3]) or months.get(match.group(2))
+        year = int(match.group(3))
+        if month:
+            try:
+                return datetime(year, month, day).strftime("%Y-%m-%d")
+            except ValueError:
+                return None
     return None
 
 
 def _extract_payment_date(text: str) -> str | None:
-    patterns = [
-        r"(?:fecha(?: de oficio)?|oficio)[^0-9]{0,10}(\d{2}[/-]\d{2}[/-]\d{2,4})",
-        r"(\d{2}[/-]\d{2}[/-]\d{2,4})",
+    normalized_text = _strip_accents(text)
+    contextual_patterns = [
+        r"(?:fecha(?: de oficio)?|oficio|miercoles|martes|lunes|jueves|viernes|sabado|domingo)[^\n]{0,40}?(\d{2}[/-]\d{2}[/-]\d{2,4})",
+        r"(?:fecha(?: de oficio)?|oficio|miercoles|martes|lunes|jueves|viernes|sabado|domingo)[^\n]{0,60}?((?:\d{1,2}\s+de\s+[a-zA-Z]+\s+de\s+\d{4})|(?:\d{1,2}\s+[a-zA-Z]{3,}\s+\d{4}))",
     ]
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if not match:
-            continue
-        normalized = _normalize_payment_date(match.group(1))
-        if normalized:
-            return normalized
+    for pattern in contextual_patterns:
+        for match in re.finditer(pattern, normalized_text, flags=re.IGNORECASE):
+            normalized = _normalize_payment_date(match.group(1))
+            if normalized:
+                return normalized
+
+    all_dates: list[str] = []
+    generic_patterns = [
+        r"(\d{2}[/-]\d{2}[/-]\d{2,4})",
+        r"((?:\d{1,2}\s+de\s+[a-zA-Z]+\s+de\s+\d{4})|(?:\d{1,2}\s+[a-zA-Z]{3,}\s+\d{4}))",
+    ]
+    for pattern in generic_patterns:
+        for match in re.finditer(pattern, normalized_text, flags=re.IGNORECASE):
+            normalized = _normalize_payment_date(match.group(1))
+            if normalized:
+                all_dates.append(normalized)
+
+    if not all_dates:
+        return None
+
+    all_dates = sorted(set(all_dates), reverse=True)
+    for candidate in all_dates:
+        if candidate.startswith("202"):
+            return candidate
+    return all_dates[0]
+
+
+def _clean_expediente_candidate(value: str) -> str | None:
+    cleaned = re.sub(r"\s+", "", (value or "").upper())
+    cleaned = cleaned.replace("EXPEDIENTE", "")
+    cleaned = cleaned.strip(" :-./")
+    if len(cleaned) < 5:
+        return None
+    if "/" in cleaned and re.search(r"\d{1,6}/\d{2,4}", cleaned):
+        return cleaned
+    if re.search(r"[A-Z]\d{1,6}/\d{2,4}", cleaned):
+        return cleaned
     return None
 
 
 def _extract_payment_expediente(text: str) -> str | None:
-    patterns = [
-        r"(?:expediente|exp\.?|juicio)\s*(?:no\.?|n[uú]m(?:ero)?\.?|:)??\s*([A-Z0-9][A-Z0-9\-/.]{3,40})",
-        r"([A-Z]{1,6}-?\d{1,6}/\d{2,4})",
-    ]
     normalized_text = _strip_accents(text).upper()
+    patterns = [
+        r"\bEXPEDIENTE\b\s*[:.-]?\s*([A-Z]?\s*\d{1,6}/\d{2,4})",
+        r"\bEXP\.?\b\s*[:.-]?\s*([A-Z]?\s*\d{1,6}/\d{2,4})",
+        r"\bJUICIO\b\s*[:.-]?\s*([A-Z]?\s*\d{1,6}/\d{2,4})",
+        r"\b([A-Z]?\s*\d{1,6}/\d{2,4})\b",
+    ]
     for pattern in patterns:
-        match = re.search(pattern, normalized_text, flags=re.IGNORECASE)
-        if match:
-            return re.sub(r"\s+", "", match.group(1).strip())
+        for match in re.finditer(pattern, normalized_text, flags=re.IGNORECASE):
+            cleaned = _clean_expediente_candidate(match.group(1))
+            if cleaned:
+                return cleaned
     return None
 
 
 def _extract_payment_beneficiary(text: str) -> str | None:
     patterns = [
         r"(?:beneficiario|a favor de|a nombre de|paguese a|paguese al C\.)\s*[:.-]?\s*([^\n]{4,120})",
+        r"solicito la devolucion al\s+C\.\s*([^\n]{4,120})",
     ]
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
             value = re.sub(r"\s+", " ", match.group(1)).strip(" .:-")
+            value = re.sub(r"\s+de los valores.*$", "", value, flags=re.IGNORECASE).strip()
             if value:
                 return value[:140]
     return None
@@ -588,17 +665,30 @@ def _extract_payment_beneficiary(text: str) -> str | None:
 def _extract_payment_concept(text: str) -> str | None:
     patterns = [
         r"(?:concepto|por concepto de|descripcion|referencia)\s*[:.-]?\s*([^\n]{4,160})",
+        r"(solicitud de devolucion)",
     ]
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
             value = re.sub(r"\s+", " ", match.group(1)).strip(" .:-")
             if value:
-                return value[:180]
+                return value[:180].title()
     return None
 
 
 def _extract_payment_juzgado(text: str) -> str | None:
+    normalized_text = _strip_accents(text).lower()
+    explicit_aliases = [
+        (r"juzgado\s+primero\s+civil", "1o Civil Tradicional"),
+        (r"juzgado\s+primer\s+civil", "1o Civil Tradicional"),
+        (r"juzgado\s+1o\s+civil", "1o Civil Tradicional"),
+        (r"juzgado\s+segundo\s+mercantil", "2o Mercantil"),
+        (r"juzgado\s+tercero\s+mercantil", "3o Mercantil"),
+    ]
+    for pattern, canonical in explicit_aliases:
+        if re.search(pattern, normalized_text, flags=re.IGNORECASE):
+            return canonical
+
     lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
     candidates = [line for line in lines if line]
     candidates.append(re.sub(r"\s+", " ", text).strip())
