@@ -667,6 +667,29 @@ def _pick_cost_from_context(lines: list[str], index: int) -> float | None:
     return values[0] if values else None
 
 
+def _extract_cost_rows_from_text(raw_text: str, filename: str) -> list[dict]:
+    if not raw_text.strip():
+        return []
+    lines = [re.sub(r"\s+", " ", line).strip() for line in raw_text.splitlines()]
+    lines = [line for line in lines if line]
+    results = {}
+    for index, line in enumerate(lines):
+        codes = re.findall(r"\b[A-Z]{1,5}-\d{2,5}-[A-Z0-9]{2,12}\b", line.upper())
+        if not codes:
+            continue
+        cost = _pick_cost_from_context(lines, index)
+        if cost is None:
+            continue
+        name = _extract_name_from_text("\n".join(lines[max(0, index - 1): min(len(lines), index + 2)]), filename)
+        for code in codes:
+            results[code] = {
+                "codigo_producto": code.upper(),
+                "costo_adquisicion": cost,
+                "nombre_detectado": name,
+            }
+    return list(results.values())
+
+
 def _extract_cost_rows_from_pdf(file_bytes: bytes, filename: str) -> list[dict]:
     raw_text = _extract_pdf_text(file_bytes)
     if not raw_text.strip():
