@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from datetime import date, datetime
 from typing import Optional
 
@@ -40,12 +41,64 @@ JUZGADOS_MR = [
     "Centro Auxiliar, Juzgado Familiar",
     "Juzgado Familiar Coadyuvante",
 ]
+def _strip_accents(value: str) -> str:
+    return "".join(ch for ch in unicodedata.normalize("NFKD", value or "") if not unicodedata.combining(ch))
+
+
+def _normalize_juzgado_key(value: str) -> str:
+    cleaned = _strip_accents(value or "").lower().strip()
+    cleaned = cleaned.replace("&", " y ")
+    cleaned = re.sub(r"[.,;:()]+", " ", cleaned)
+    ordinal_words = {
+        "primero": "1o",
+        "primer": "1o",
+        "segundo": "2o",
+        "tercero": "3o",
+        "cuarto": "4o",
+        "quinto": "5o",
+        "sexto": "6o",
+        "septimo": "7o",
+        "octavo": "8o",
+        "noveno": "9o",
+        "decimo": "10o",
+        "undecimo": "11o",
+        "duodecimo": "12o",
+        "decimotercero": "13o",
+    }
+    for source, target in ordinal_words.items():
+        cleaned = re.sub(rf"\b{source}\b", target, cleaned)
+    cleaned = re.sub(r"(\d+)\s*(?:o|º|°|ro|er|do|to|mo)?\b", r"\1o", cleaned, flags=re.IGNORECASE)
+    replacements = [
+        (r"\besp\b", "especializado"),
+        (r"\bext\b", "extincion"),
+        (r"\bdom\b", "dominio"),
+        (r"\bmerc\b", "mercantil"),
+        (r"\bfam\b", "familiar"),
+        (r"\baud\b", "audiencias"),
+        (r"\btradic\b", "tradicional"),
+    ]
+    for pattern, repl in replacements:
+        cleaned = re.sub(pattern, repl, cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _build_juzgado_aliases(label: str) -> set[str]:
+    base = _normalize_juzgado_key(label)
+    aliases = {
+        base,
+        base.replace("juzgado ", ""),
+        base.replace(" por audiencias", " audiencias"),
+        base.replace(" y especializado extincion dominio", " y esp ext dom"),
+        base.replace(" y ", " "),
+    }
+    return {alias.strip() for alias in aliases if alias and alias.strip()}
+
+
 JUZGADOS_MR_MAP = {}
 for item in JUZGADOS_MR:
-    key = re.sub(r"\s+", " ", item.strip())
-    key = re.sub(r"(\d+)\s*[oº°]", r"\1o", key, flags=re.IGNORECASE)
-    key = key.replace(" ,", ",").lower()
-    JUZGADOS_MR_MAP[key] = item
+    for alias in _build_juzgado_aliases(item):
+        JUZGADOS_MR_MAP[alias] = item
 
 PENDIENTE_ESTADOS = {"pendiente", "completado", "reprogramado", "archivado"}
 ACTIVIDAD_TIPOS = {"general", "emplazar", "diligencia", "audiencia", "otro"}
@@ -121,13 +174,6 @@ def _to_bool(value, default: bool = False) -> bool:
     if value is None:
         return default
     return str(value).strip().lower() in {"1", "true", "si", "yes", "on"}
-
-
-def _normalize_juzgado_key(value: str) -> str:
-    cleaned = re.sub(r"\s+", " ", (value or "").strip())
-    cleaned = re.sub(r"(\d+)\s*[oº°]", r"\1o", cleaned, flags=re.IGNORECASE)
-    cleaned = cleaned.replace(" ,", ",")
-    return cleaned.lower()
 
 
 def _listar_juzgados_personalizados() -> list[dict]:
