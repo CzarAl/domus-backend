@@ -664,6 +664,8 @@ def _normalize_code_candidate(raw: str) -> str | None:
         return parts[0]
     if len(parts) == 1 and re.fullmatch(r"\d{4,6}", parts[0]):
         return parts[0]
+    if len(parts) == 2 and re.fullmatch(r"\d{3}", parts[0]) and re.fullmatch(r"[A-Z]{4,20}", parts[1]):
+        return parts[0]
     if len(parts) == 2 and re.fullmatch(r"[A-Z]{1,4}\d{4,6}", parts[0]) and re.fullmatch(r"[A-Z0-9]{2,12}", parts[1]):
         return "-".join(parts[:2])
     if len(parts) < 3:
@@ -686,6 +688,7 @@ def _extract_code_candidates(text: str) -> list[str]:
         r"\b\d{2,5}\s+[A-Z0-9]{1,5}\s+\d{2,5}\s+\d{2,5}\b",
         r"\b[A-Z]{2,6}\d{2,6}\b",
         r"\b\d{4,6}\b",
+        r"\b\d{3}\s+[A-Z]{4,20}\b",
         r"\b[A-Z]{1,4}\d{4,6}-[A-Z0-9]{2,12}\b",
     ]
     found = []
