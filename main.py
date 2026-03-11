@@ -41,6 +41,7 @@ from routes import admin_cargos
 from routes import empresa_finanzas
 from routes import mr
 from routes import storefront
+from routes import drive_sync
 
 
 import os
@@ -59,6 +60,7 @@ app = FastAPI()
 # Routers
 app.include_router(mr.router)
 app.include_router(storefront.router)
+app.include_router(drive_sync.router, dependencies=[Depends(get_current_user)])
 
 # =================================
 # MIDDLEWARE AUDITORÍA BLOQUEO

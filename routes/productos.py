@@ -32,6 +32,7 @@ class ProductoCreate(BaseModel):
     ubicacion: str | None = Field(default=None, max_length=180)
     foto_url: str | None = Field(default=None, max_length=1000)
     categoria: str | None = Field(default=None, max_length=80)
+    codigo_producto: str | None = Field(default=None, max_length=80)
     slug: str | None = Field(default=None, max_length=160)
     visible_publico: bool = True
     destacado: bool = False
@@ -49,6 +50,7 @@ class ProductoUpdate(BaseModel):
     ubicacion: str | None = Field(default=None, max_length=180)
     foto_url: str | None = Field(default=None, max_length=1000)
     categoria: str | None = Field(default=None, max_length=80)
+    codigo_producto: str | None = Field(default=None, max_length=80)
     slug: str | None = Field(default=None, max_length=160)
     visible_publico: bool | None = None
     destacado: bool | None = None
@@ -102,6 +104,9 @@ def _normalizar_producto(p: dict) -> dict:
         "ubicacion": p.get("ubicacion") if p.get("ubicacion") is not None else p.get("ubicacion_producto"),
         "foto_url": p.get("foto_url") if p.get("foto_url") is not None else p.get("imagen_url"),
         "categoria": p.get("categoria") or "Sin categoria",
+        "codigo_producto": p.get("codigo_producto"),
+        "precio_publico": p.get("precio_publico") if p.get("precio_publico") is not None else p.get("precio") if p.get("precio") is not None else p.get("precio_venta") or 0,
+        "piezas_por_caja": p.get("piezas_por_caja"),
         "slug": slug,
         "visible_publico": p.get("visible_publico", True),
         "destacado": p.get("destacado", False),
@@ -318,6 +323,7 @@ def crear_producto(datos: ProductoCreate, usuario=Depends(get_current_user)):
     ubicacion = (datos.ubicacion or "").strip() or None
     foto_url = (datos.foto_url or "").strip() or None
     categoria = (datos.categoria or "").strip() or None
+    codigo_producto = (datos.codigo_producto or "").strip().upper() or None
     slug = _slug_text(datos.slug.strip()) if datos.slug else _slug_text(nombre)
     imagenes_extra = _normalize_gallery(datos.imagenes_extra)
     origen_catalogo = (datos.origen_catalogo or "manual").strip() or "manual"
@@ -332,6 +338,8 @@ def crear_producto(datos: ProductoCreate, usuario=Depends(get_current_user)):
         "ubicacion": ubicacion,
         "foto_url": foto_url,
         "categoria": categoria,
+        "codigo_producto": codigo_producto,
+        "precio_publico": datos.precio,
         "slug": slug,
         "visible_publico": datos.visible_publico,
         "destacado": datos.destacado,
@@ -414,6 +422,8 @@ def actualizar_producto(id_producto: str, datos: ProductoUpdate, usuario=Depends
         base["foto_url"] = datos.foto_url.strip() or None
     if datos.categoria is not None:
         base["categoria"] = datos.categoria.strip() or None
+    if datos.codigo_producto is not None:
+        base["codigo_producto"] = datos.codigo_producto.strip().upper() or None
     if datos.slug is not None:
         base["slug"] = _slug_text(datos.slug.strip()) if datos.slug.strip() else _slug_text(nombre_actual)
     if datos.visible_publico is not None:
