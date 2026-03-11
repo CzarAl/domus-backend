@@ -250,6 +250,13 @@ def _vision_parent() -> str | None:
     return f"projects/{project_id}/locations/{location}"
 
 
+def _vision_endpoint(parent: str | None) -> str:
+    if not parent:
+        return GOOGLE_VISION_FILES_ANNOTATE_URL
+    location = (os.getenv("GOOGLE_VISION_LOCATION") or "us").strip()
+    return f"https://{location}-vision.googleapis.com/v1/{parent}/files:annotate"
+
+
 def _vision_enabled() -> bool:
     value = (os.getenv("GOOGLE_VISION_OCR_ENABLED") or "true").strip().lower()
     return value not in {"0", "false", "no", "off"}
@@ -282,11 +289,10 @@ def _vision_ocr_pdf(file_bytes: bytes, filename: str, config: dict) -> str:
                 }
             ]
         }
-        if parent:
-            payload["parent"] = parent
+        endpoint_url = _vision_endpoint(parent)
 
         request = urllib.request.Request(
-            GOOGLE_VISION_FILES_ANNOTATE_URL,
+            endpoint_url,
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {access_token}",
