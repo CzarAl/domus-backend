@@ -905,6 +905,11 @@ def importar_costos_pdf(
             supabase.table("productos").update({"costo_adquisicion": float(row["costo_adquisicion"])}).eq("id_empresa", id_empresa).eq("codigo_producto", row["codigo_producto"]).execute()
             guardados += 1
 
+        ocr_preview = None
+        if texto_pdf.strip() and not rows:
+            compact_preview = re.sub(r"\s+", " ", texto_pdf).strip()
+            ocr_preview = compact_preview[:800] if compact_preview else None
+
         resumen_archivo = {
             "nombre_archivo": archivo.filename,
             "costos_detectados": len(rows),
@@ -912,6 +917,7 @@ def importar_costos_pdf(
             "requiere_ocr": requiere_ocr,
             "ocr_usado": ocr_usado,
             "ocr_error": ocr_error,
+            "ocr_preview": ocr_preview,
             "ejemplos": rows[:5],
         }
         _registrar_importacion_costos(id_empresa, archivo.filename or "catalogo.pdf", proveedor_value, resumen_archivo)
