@@ -631,16 +631,22 @@ def _registrar_importacion_costos(id_empresa: str, nombre_archivo: str, proveedo
         pass
 
 
-def _extract_money_values(text: str) -> list[float]:
+def _extract_money_values(text: str, *, allow_plain_numbers: bool = True, blocked_numbers: set[str] | None = None) -> list[float]:
+    blocked_numbers = blocked_numbers or set()
     values = []
     patterns = [
-        r"\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})?)",
-        r"(?<!\d)([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2}))(?!\d)",
+        r"\$\s*([0-9]{1,4}(?:,[0-9]{3})*(?:\.\d{2})?)",
     ]
+    if allow_plain_numbers:
+        patterns.append(r"(?<!\d)([0-9]{1,4}(?:,[0-9]{3})*(?:\.\d{2}))(?!\d)")
     for pattern in patterns:
         for raw in re.findall(pattern, text or "", flags=re.IGNORECASE):
+            normalized_raw = raw.replace(",", "")
+            integer_part = normalized_raw.split(".", 1)[0]
+            if integer_part in blocked_numbers:
+                continue
             try:
-                value = float(raw.replace(",", ""))
+                value = float(normalized_raw)
             except Exception:
                 continue
             if 1 <= value <= 1000000:
@@ -655,26 +661,87 @@ def _extract_money_values(text: str) -> list[float]:
     return deduped
 
 
+def _normalize_letters_segment(value: str) -> str:
+    return (value or "").upper().translate(str.maketrans({"0": "O", "1": "I", "5": "S", "8": "B"}))
+
+
+def _normalize_digits_segment(value: str) -> str:
+    return (value or "").upper().translate(str.maketrans({"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "Z": "2", "S": "5", "B": "8"}))
+
+
+def _normalize_alnum_segment(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (value or "").upper())
+
+
 def _normalize_code_candidate(raw: str) -> str | None:
     cleaned = (raw or "").upper()
     cleaned = re.sub(r"[^A-Z0-9]+", "-", cleaned)
     cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-")
     parts = [part for part in cleaned.split("-") if part]
-    if len(parts) == 1 and re.fullmatch(r"[A-Z]{2,6}\d{2,6}", parts[0]):
-        return parts[0]
-    if len(parts) == 1 and re.fullmatch(r"\d{4,6}", parts[0]):
-        return parts[0]
-    if len(parts) == 2 and re.fullmatch(r"\d{3}", parts[0]) and re.fullmatch(r"[A-Z]{4,20}", parts[1]):
-        return parts[0]
-    if len(parts) == 2 and re.fullmatch(r"[A-Z]{1,4}\d{4,6}", parts[0]) and re.fullmatch(r"[A-Z0-9]{2,12}", parts[1]):
-        return "-".join(parts[:2])
-    if len(parts) < 3:
-        return None
-    if re.fullmatch(r"[A-Z]{1,5}", parts[0]) and re.fullmatch(r"\d{2,5}", parts[1]) and re.fullmatch(r"[A-Z0-9]{2,12}", parts[2]):
-        return "-".join(parts[:3])
-    if 3 <= len(parts) <= 4 and re.fullmatch(r"\d{2,5}", parts[0]) and all(re.fullmatch(r"[A-Z0-9]{1,5}", part) for part in parts[1:]):
-        return "-".join(parts[:4])
+
+    if len(parts) == 1:
+        single = _normalize_alnum_segment(parts[0])
+        if re.fullmatch(r"[A-Z]{2,6}\d{2,6}", _normalize_letters_segment(single[:6]) + _normalize_digits_segment(single[6:])):
+            return single
+        if re.fullmatch(r"\d{3,6}", _normalize_digits_segment(single)):
+            return _normalize_digits_segment(single)
+
+    if len(parts) == 2:
+        first = _normalize_alnum_segment(parts[0])
+        second = _normalize_alnum_segment(parts[1])
+        first_candidate = _normalize_letters_segment(re.sub(r"\d", "", first)) + _normalize_digits_segment(re.sub(r"\D", "", first))
+        if re.fullmatch(r"\d{3}", _normalize_digits_segment(first)) and re.fullmatch(r"[A-Z]{4,20}", _normalize_letters_segment(second)):
+            return _normalize_digits_segment(first)
+        if re.fullmatch(r"[A-Z]{1,4}\d{4,6}", first_candidate) and re.fullmatch(r"[A-Z0-9]{2,12}", second):
+            return f"{first_candidate}-{second}"
+
+    if len(parts) >= 3:
+        first = _normalize_letters_segment(parts[0])
+        second = _normalize_digits_segment(parts[1])
+        third = _normalize_alnum_segment(parts[2])
+        if re.fullmatch(r"[A-Z]{1,5}", first) and re.fullmatch(r"\d{2,5}", second) and re.fullmatch(r"[A-Z0-9]{2,12}", third):
+            return "-".join([first, second, third])
+
+    if 3 <= len(parts) <= 4:
+        fixed_parts = [_normalize_digits_segment(parts[0])] + [_normalize_alnum_segment(part) for part in parts[1:4]]
+        if re.fullmatch(r"\d{2,5}", fixed_parts[0]) and all(re.fullmatch(r"[A-Z0-9]{1,12}", part) for part in fixed_parts[1:]):
+            return "-".join(fixed_parts[: len(parts)])
+
     return None
+
+
+def _code_score(code: str) -> int:
+    score = 0
+    if "-" in code:
+        score += code.count("-") * 2
+    if re.search(r"[A-Z]", code) and re.search(r"\d", code):
+        score += 3
+    if len(code) >= 8:
+        score += 2
+    if re.fullmatch(r"\d{3}", code):
+        score -= 3
+    elif re.fullmatch(r"\d{4,6}", code):
+        score += 1
+    return score
+
+
+def _prune_code_candidates(codes: list[str]) -> list[str]:
+    unique = []
+    seen = set()
+    for code in codes:
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        unique.append(code)
+    rich_codes = [code for code in unique if _code_score(code) >= 4]
+    pruned = []
+    for code in unique:
+        if any(code != rich and code in rich for rich in rich_codes):
+            continue
+        if rich_codes and re.fullmatch(r"\d{3,4}", code):
+            continue
+        pruned.append(code)
+    return pruned
 
 
 def _extract_code_candidates(text: str) -> list[str]:
@@ -684,35 +751,44 @@ def _extract_code_candidates(text: str) -> list[str]:
         r"\b[A-Z]{1,5}\s*[- ]\s*\d{2,5}\s*[- ]\s*[A-Z0-9]{2,12}\b",
         r"\b[A-Z]{1,5}-\d{2,5}[A-Z0-9]{2,12}\b",
         r"\b[A-Z]{1,5}\d{2,5}\s*[- ]\s*[A-Z0-9]{2,12}\b",
-        r"\b\d{2,5}\s*[- ]\s*[A-Z0-9]{1,5}\s*[- ]\s*[A-Z0-9]{1,5}\s*[- ]\s*[A-Z0-9]{1,5}\b",
-        r"\b\d{2,5}\s+[A-Z0-9]{1,5}\s+\d{2,5}\s+\d{2,5}\b",
+        r"\b\d{2,5}\s*[- ]\s*[A-Z0-9]{1,12}\s*[- ]\s*[A-Z0-9]{1,12}\s*[- ]\s*[A-Z0-9]{1,12}\b",
+        r"\b\d{2,5}\s+[A-Z0-9]{1,12}\s+\d{2,5}\s+\d{2,5}\b",
         r"\b[A-Z]{2,6}\d{2,6}\b",
         r"\b\d{4,6}\b",
         r"\b\d{3}\s+[A-Z]{4,20}\b",
         r"\b[A-Z]{1,4}\d{4,6}-[A-Z0-9]{2,12}\b",
     ]
     found = []
-    seen = set()
     for pattern in patterns:
         for raw in re.findall(pattern, (text or "").upper()):
             normalized = _normalize_code_candidate(raw)
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            found.append(normalized)
-    return found
+            if normalized:
+                found.append(normalized)
+    return _prune_code_candidates(found)
 
 
-def _pick_cost_from_context(lines: list[str], index: int) -> float | None:
-    window = " ".join(lines[max(0, index - 1): min(len(lines), index + 3)])
-    tagged = re.findall(r"(?:costo|distribuidor|precio|p\.\s*distribuidor)[^0-9$]{0,8}\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.\d{2})?)", window, flags=re.IGNORECASE)
-    if tagged:
+def _pick_cost_from_context(lines: list[str], index: int, codes: list[str]) -> float | None:
+    window_lines = lines[max(0, index - 1): min(len(lines), index + 3)]
+    window = " ".join(window_lines)
+    blocked_numbers = {re.sub(r"\D", "", code) for code in codes if re.fullmatch(r"\d{3,6}", re.sub(r"\D", "", code))}
+
+    tagged = re.findall(r"(?:costo|distribuidor|precio|p\.\s*distribuidor|p/pza|pza\.|p/par|del par)[^0-9$]{0,12}\$?\s*([0-9]{1,4}(?:,[0-9]{3})*(?:\.\d{2})?)", window, flags=re.IGNORECASE)
+    for raw in tagged:
         try:
-            return round(float(tagged[0].replace(",", "")), 2)
+            return round(float(raw.replace(",", "")), 2)
         except Exception:
-            pass
-    values = _extract_money_values(window)
-    return values[0] if values else None
+            continue
+
+    currency_values = _extract_money_values(window, allow_plain_numbers=False, blocked_numbers=blocked_numbers)
+    if currency_values:
+        return currency_values[0]
+
+    if re.search(r"P/PZA|PZA\.|P/PAR|DEL PAR|PRECIO|COSTO|DISTRIBUIDOR", window, flags=re.IGNORECASE):
+        plain_values = _extract_money_values(window, allow_plain_numbers=True, blocked_numbers=blocked_numbers)
+        if plain_values:
+            return plain_values[0]
+
+    return None
 
 
 def _extract_cost_rows_from_text(raw_text: str, filename: str) -> list[dict]:
@@ -722,46 +798,63 @@ def _extract_cost_rows_from_text(raw_text: str, filename: str) -> list[dict]:
     lines = [line for line in lines if line]
     results = {}
     for index, line in enumerate(lines):
-        codes = _extract_code_candidates(line)
-        if not codes and index + 1 < len(lines):
-            codes = _extract_code_candidates(f"{line} {lines[index + 1]}")
+        window_text = line
+        if index + 1 < len(lines):
+            window_text = f"{line} {lines[index + 1]}"
+        codes = _extract_code_candidates(window_text)
         if not codes:
             continue
-        cost = _pick_cost_from_context(lines, index)
+        cost = _pick_cost_from_context(lines, index, codes)
         if cost is None:
             continue
         name = _extract_name_from_text("\n".join(lines[max(0, index - 1): min(len(lines), index + 2)]), filename)
         for code in codes:
-            results[code] = {
+            quality = _code_score(code) + (2 if "$" in window_text else 0)
+            row = {
                 "codigo_producto": code.upper(),
                 "costo_adquisicion": cost,
                 "nombre_detectado": name,
+                "calidad": quality,
             }
-    return list(results.values())
+            existing = results.get(code)
+            if not existing or row["calidad"] > existing.get("calidad", 0):
+                results[code] = row
+    ordered = sorted(results.values(), key=lambda item: (-item.get("calidad", 0), item.get("codigo_producto") or ""))
+    for item in ordered:
+        item.pop("calidad", None)
+    return ordered
 
 
 def _extract_cost_rows_from_pdf(file_bytes: bytes, filename: str) -> list[dict]:
-    raw_text = _extract_pdf_text(file_bytes)
-    if not raw_text.strip():
-        return []
-    lines = [re.sub(r"\s+", " ", line).strip() for line in raw_text.splitlines()]
-    lines = [line for line in lines if line]
-    results = {}
-    for index, line in enumerate(lines):
-        codes = re.findall(r"\b[A-Z]{1,5}-\d{2,5}-[A-Z0-9]{2,12}\b", line.upper())
-        if not codes:
-            continue
-        cost = _pick_cost_from_context(lines, index)
-        if cost is None:
-            continue
-        name = _extract_name_from_text("\n".join(lines[max(0, index - 1): min(len(lines), index + 2)]), filename)
-        for code in codes:
-            results[code] = {
-                "codigo_producto": code.upper(),
-                "costo_adquisicion": cost,
-                "nombre_detectado": name,
-            }
-    return list(results.values())
+    return _extract_cost_rows_from_text(_extract_pdf_text(file_bytes), filename)
+
+
+def _row_requires_review(row: dict) -> bool:
+    code = (row.get("codigo_producto") or "").strip().upper()
+    if not code:
+        return True
+    if re.fullmatch(r"\d{3}", code):
+        return True
+    if len(code) < 5:
+        return True
+    if code.count("-") >= 3 and len(code) < 8:
+        return True
+    return False
+
+
+def _build_import_warnings(rows: list[dict], *, ocr_usado: bool, review_rows: list[dict] | None = None) -> list[str]:
+    warnings = []
+    review_rows = review_rows or []
+    if ocr_usado and len(rows) < 3:
+        warnings.append("Cobertura baja: se detectaron muy pocos articulos; revisa el OCR antes de confiar en la importacion completa.")
+    short_codes = [row.get("codigo_producto") for row in rows if re.fullmatch(r"\d{3}", row.get("codigo_producto") or "")]
+    if short_codes:
+        sample = ", ".join(short_codes[:5])
+        warnings.append(f"Hay claves cortas que pueden requerir revision manual: {sample}.")
+    if review_rows:
+        sample = ", ".join([(row.get("codigo_producto") or "").strip() for row in review_rows[:5] if row.get("codigo_producto")])
+        warnings.append(f"Se omitieron {len(review_rows)} claves dudosas del guardado automatico para revision manual: {sample}.")
+    return warnings
 
 
 def _buscar_producto_por_codigo(id_empresa: str, codigo_producto: str | None):
@@ -911,8 +1004,10 @@ def importar_costos_pdf(
 
         requiere_ocr = not bool(texto_pdf.strip())
         rows = _extract_cost_rows_from_text(texto_pdf, archivo.filename or "catalogo.pdf") if texto_pdf.strip() else []
+        approved_rows = [row for row in rows if not _row_requires_review(row)]
+        review_rows = [row for row in rows if _row_requires_review(row)]
         guardados = 0
-        for row in rows:
+        for row in approved_rows:
             _guardar_costo(id_empresa, row["codigo_producto"], row["costo_adquisicion"], proveedor_value, f"Importado desde PDF: {archivo.filename}")
             supabase.table("productos").update({"costo_adquisicion": float(row["costo_adquisicion"])}).eq("id_empresa", id_empresa).eq("codigo_producto", row["codigo_producto"]).execute()
             guardados += 1
@@ -922,15 +1017,20 @@ def importar_costos_pdf(
             compact_preview = re.sub(r"\s+", " ", texto_pdf).strip()
             ocr_preview = compact_preview[:800] if compact_preview else None
 
+        advertencias = _build_import_warnings(rows, ocr_usado=ocr_usado, review_rows=review_rows)
         resumen_archivo = {
             "nombre_archivo": archivo.filename,
             "costos_detectados": len(rows),
             "costos_guardados": guardados,
+            "costos_revision": len(review_rows),
             "requiere_ocr": requiere_ocr,
             "ocr_usado": ocr_usado,
             "ocr_error": ocr_error,
             "ocr_preview": ocr_preview,
-            "ejemplos": rows[:5],
+            "requiere_revision": bool(advertencias),
+            "advertencias": advertencias,
+            "ejemplos": approved_rows[:5],
+            "ejemplos_revision": review_rows[:5],
         }
         _registrar_importacion_costos(id_empresa, archivo.filename or "catalogo.pdf", proveedor_value, resumen_archivo)
         resumen_global["archivos_procesados"] += 1
