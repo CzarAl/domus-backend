@@ -94,6 +94,10 @@ def _normalize_gallery(value) -> list[str]:
 
 def _normalizar_producto(p: dict) -> dict:
     slug = p.get("slug") or _slug_text(p.get("nombre") or "producto")
+    imagenes_extra = _normalize_gallery(p.get("imagenes_extra"))
+    foto_url = p.get("foto_url") if p.get("foto_url") is not None else p.get("imagen_url")
+    if not foto_url and imagenes_extra:
+        foto_url = imagenes_extra[0]
     return {
         "id": p.get("id"),
         "id_empresa": p.get("id_empresa"),
@@ -102,7 +106,7 @@ def _normalizar_producto(p: dict) -> dict:
         "costo_adquisicion": p.get("costo_adquisicion") if p.get("costo_adquisicion") is not None else p.get("costo") or 0,
         "precio": p.get("precio") if p.get("precio") is not None else p.get("precio_venta") or 0,
         "ubicacion": p.get("ubicacion") if p.get("ubicacion") is not None else p.get("ubicacion_producto"),
-        "foto_url": p.get("foto_url") if p.get("foto_url") is not None else p.get("imagen_url"),
+        "foto_url": foto_url,
         "categoria": p.get("categoria") or "Sin categoria",
         "codigo_producto": p.get("codigo_producto"),
         "precio_publico": p.get("precio_publico") if p.get("precio_publico") is not None else p.get("precio") if p.get("precio") is not None else p.get("precio_venta") or 0,
@@ -111,7 +115,7 @@ def _normalizar_producto(p: dict) -> dict:
         "visible_publico": p.get("visible_publico", True),
         "destacado": p.get("destacado", False),
         "origen_catalogo": p.get("origen_catalogo") or "manual",
-        "imagenes_extra": _normalize_gallery(p.get("imagenes_extra")),
+        "imagenes_extra": imagenes_extra,
         "activo": p.get("activo", True),
         "fecha_creacion": p.get("fecha_creacion"),
     }

@@ -20,6 +20,22 @@ _BUCKET_MIME_TYPES = [
 _BUCKET_FILE_SIZE_LIMIT = 10 * 1024 * 1024
 
 
+def _public_storage_url(value) -> str:
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, dict):
+        for key in ("publicURL", "publicUrl", "public_url", "signedURL", "signedUrl", "url"):
+            url = value.get(key)
+            if isinstance(url, str) and url.strip():
+                return url.strip()
+        data = value.get("data")
+        if data is not None:
+            return _public_storage_url(data)
+
+    return ""
+
+
 def _ensure_bucket(bucket: str) -> None:
     try:
         supabase.storage.get_bucket(bucket)
@@ -58,7 +74,9 @@ def _upload(file: UploadFile, bucket: str, prefix: str) -> str:
 
     try:
         supabase.storage.from_(bucket).upload(key, contents, {"content-type": file.content_type or "application/octet-stream"})
-        url = supabase.storage.from_(bucket).get_public_url(key)
+        url = _public_storage_url(supabase.storage.from_(bucket).get_public_url(key))
+        if not url:
+            raise HTTPException(status_code=500, detail="Supabase no devolvio una URL publica valida para la imagen")
         return url
     except Exception as e:
         message = str(e)

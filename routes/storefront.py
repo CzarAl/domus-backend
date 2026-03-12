@@ -69,13 +69,16 @@ def _storefront_config():
 
 
 def _public_storefront_product(producto: dict) -> dict:
+    imagenes_extra = producto.get("imagenes_extra") or []
+    foto_url = producto.get("foto_url") or (imagenes_extra[0] if imagenes_extra else None)
+    precio_publico = producto.get("precio_publico") if producto.get("precio_publico") is not None else producto.get("precio")
     return {
         "id": producto.get("id"),
         "nombre": producto.get("nombre"),
         "descripcion": producto.get("descripcion"),
-        "precio": producto.get("precio"),
-        "precio_publico": producto.get("precio_publico") if producto.get("precio_publico") is not None else producto.get("precio"),
-        "foto_url": producto.get("foto_url"),
+        "precio": precio_publico,
+        "precio_publico": precio_publico,
+        "foto_url": foto_url,
         "categoria": producto.get("categoria"),
         "codigo_producto": producto.get("codigo_producto"),
         "piezas_por_caja": producto.get("piezas_por_caja"),
@@ -83,8 +86,20 @@ def _public_storefront_product(producto: dict) -> dict:
         "destacado": producto.get("destacado"),
         "visible_publico": producto.get("visible_publico", True),
         "origen_catalogo": producto.get("origen_catalogo"),
-        "imagenes_extra": producto.get("imagenes_extra") or [],
+        "imagenes_extra": imagenes_extra,
     }
+
+
+def _storefront_product_rows(empresa_id: str) -> list[dict]:
+    resp = (
+        supabase.table("productos")
+        .select("*")
+        .eq("id_empresa", empresa_id)
+        .order("destacado", desc=True)
+        .order("fecha_creacion", desc=True)
+        .execute()
+    )
+    return [item for item in (resp.data or []) if item.get("activo", True) is not False]
 
 
 @router.get("/config")
@@ -95,17 +110,7 @@ def storefront_config():
 @router.get("/productos")
 def storefront_productos():
     empresa_id = _storefront_empresa_id()
-    resp = (
-        supabase.table("productos")
-        .select("*")
-        .eq("id_empresa", empresa_id)
-        .eq("activo", True)
-        .order("destacado", desc=True)
-        .order("fecha_creacion", desc=True)
-        .execute()
-    )
-
-    productos = [_normalizar_producto(item) for item in (resp.data or [])]
+    productos = [_normalizar_producto(item) for item in _storefront_product_rows(empresa_id)]
     productos_publicos = [_public_storefront_product(item) for item in productos if item.get("visible_publico", True)]
     categorias = sorted({item.get("categoria") or "Sin categoria" for item in productos_publicos})
 
@@ -119,15 +124,7 @@ def storefront_productos():
 @router.get("/productos/{slug_or_id}")
 def storefront_producto_detalle(slug_or_id: str):
     empresa_id = _storefront_empresa_id()
-    resp = (
-        supabase.table("productos")
-        .select("*")
-        .eq("id_empresa", empresa_id)
-        .eq("activo", True)
-        .execute()
-    )
-
-    productos = [_normalizar_producto(item) for item in (resp.data or [])]
+    productos = [_normalizar_producto(item) for item in _storefront_product_rows(empresa_id)]
     for producto in productos:
         if not producto.get("visible_publico", True):
             continue
