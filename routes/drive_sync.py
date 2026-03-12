@@ -17,6 +17,7 @@ import jwt
 
 from database import supabase
 from dependencies import get_current_user
+from routes.productos import _extract_variantes_metadata
 
 router = APIRouter(prefix="/drive-sync", tags=["Drive Sync"])
 
@@ -1510,13 +1511,27 @@ def _buscar_producto_por_codigo(id_empresa: str, codigo_producto: str | None):
     if not codigo_producto:
         return None
     codigo = codigo_producto.strip().upper()
-    resp = supabase.table("productos").select("id,codigo_producto").eq("id_empresa", id_empresa).eq("codigo_producto", codigo).limit(1).execute()
+    resp = (
+        supabase.table("productos")
+        .select("id,codigo_producto,descripcion")
+        .eq("id_empresa", id_empresa)
+        .eq("codigo_producto", codigo)
+        .limit(1)
+        .execute()
+    )
     if resp.data:
         return resp.data[0]
-    fallback = supabase.table("productos").select("id,codigo_producto").eq("id_empresa", id_empresa).execute()
-    return _pick_best_row_by_code(codigo, fallback.data or [])
+    fallback = supabase.table("productos").select("id,codigo_producto,descripcion").eq("id_empresa", id_empresa).execute()
+    rows = fallback.data or []
+    direct_match = _pick_best_row_by_code(codigo, rows)
+    if direct_match:
+        return direct_match
 
-
+    for row in rows:
+        _, variantes = _extract_variantes_metadata(row.get("descripcion"))
+        if _pick_best_row_by_code(codigo, variantes, field="codigo"):
+            return row
+    return None
 def _guardar_producto_desde_revision(id_empresa: str, revision: dict, drive_item: dict, proposed: dict):
     codigo_producto = (proposed.get("codigo_producto") or "").strip().upper() or None
     nombre = (proposed.get("nombre") or "").strip()
@@ -1832,3 +1847,4 @@ def rentabilidad(usuario=Depends(get_current_user)):
         "producto_mas_rentable": rentables[0] if rentables else None,
         "productos": ranking,
     }
+

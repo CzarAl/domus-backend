@@ -72,6 +72,7 @@ def _public_storefront_product(producto: dict) -> dict:
     imagenes_extra = producto.get("imagenes_extra") or []
     foto_url = producto.get("foto_url") or (imagenes_extra[0] if imagenes_extra else None)
     precio_publico = producto.get("precio_publico") if producto.get("precio_publico") is not None else producto.get("precio")
+    variantes_catalogo = producto.get("variantes_catalogo") or []
     return {
         "id": producto.get("id"),
         "nombre": producto.get("nombre"),
@@ -87,9 +88,8 @@ def _public_storefront_product(producto: dict) -> dict:
         "visible_publico": producto.get("visible_publico", True),
         "origen_catalogo": producto.get("origen_catalogo"),
         "imagenes_extra": imagenes_extra,
+        "variantes_catalogo": variantes_catalogo,
     }
-
-
 def _storefront_product_rows(empresa_id: str) -> list[dict]:
     resp = (
         supabase.table("productos")
@@ -162,3 +162,4 @@ def storefront_registrar_cliente(datos: StorefrontClienteRegistro):
         raise HTTPException(status_code=400, detail=str(exc))
 
     return {"mensaje": "Cliente registrado", "data": resp.data}
+

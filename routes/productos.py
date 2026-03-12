@@ -22,6 +22,16 @@ GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
 GOOGLE_DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
+VARIANTES_MARKER_START = "[VARIANTES_DOMUS]"
+VARIANTES_MARKER_END = "[/VARIANTES_DOMUS]"
+
+
+class VarianteCatalogo(BaseModel):
+    codigo: str = Field(min_length=2, max_length=80)
+    color: str | None = Field(default=None, max_length=120)
+    precio_publico: float | None = Field(default=None, ge=0)
+    costo_adquisicion: float | None = Field(default=None, ge=0)
+    piezas_por_caja: int | None = Field(default=None, ge=0)
 
 
 class ProductoCreate(BaseModel):
@@ -38,6 +48,7 @@ class ProductoCreate(BaseModel):
     destacado: bool = False
     origen_catalogo: str | None = Field(default="manual", max_length=40)
     imagenes_extra: list[str] | None = None
+    variantes_catalogo: list[VarianteCatalogo] | None = None
     id_sucursal_inicial: str | None = None
     stock_inicial: int | None = Field(default=None, ge=0)
 
@@ -56,6 +67,7 @@ class ProductoUpdate(BaseModel):
     destacado: bool | None = None
     origen_catalogo: str | None = Field(default=None, max_length=40)
     imagenes_extra: list[str] | None = None
+    variantes_catalogo: list[VarianteCatalogo] | None = None
     activo: bool | None = None
     id_sucursal_inicial: str | None = None
     stock_inicial: int | None = Field(default=None, ge=0)
@@ -92,30 +104,108 @@ def _normalize_gallery(value) -> list[str]:
     return []
 
 
+def _normalize_variant_code(value: str | None) -> str:
+    return str(value or "").strip().upper()
+
+
+def _normalize_variant_color(value: str | None) -> str | None:
+    cleaned = str(value or "").strip()
+    return cleaned or None
+
+
+def _extract_variantes_metadata(descripcion: str | None) -> tuple[str, list[dict]]:
+    raw = str(descripcion or "")
+    if VARIANTES_MARKER_START not in raw or VARIANTES_MARKER_END not in raw:
+        return raw.strip(), []
+
+    try:
+        start = raw.index(VARIANTES_MARKER_START) + len(VARIANTES_MARKER_START)
+        end = raw.index(VARIANTES_MARKER_END, start)
+        payload = raw[start:end].strip()
+        variantes = json.loads(payload) if payload else []
+    except Exception:
+        return raw.strip(), []
+
+    clean = (raw[: raw.index(VARIANTES_MARKER_START)] + raw[end + len(VARIANTES_MARKER_END):]).strip()
+    return clean, _normalize_variantes_catalogo(variantes)
+
+
+def _embed_variantes_metadata(descripcion: str | None, variantes: list[dict]) -> str | None:
+    clean = str(descripcion or "").strip()
+    if not variantes:
+        return clean or None
+    payload = json.dumps(variantes, ensure_ascii=True, separators=(",", ":"))
+    body = f"{VARIANTES_MARKER_START}{payload}{VARIANTES_MARKER_END}"
+    return f"{body}\n{clean}".strip()
+
+
+def _normalize_variantes_catalogo(value) -> list[dict]:
+    if not value:
+        return []
+
+    raw_items = value
+    if isinstance(value, str):
+        try:
+            raw_items = json.loads(value)
+        except Exception:
+            raw_items = []
+
+    if not isinstance(raw_items, list):
+        return []
+
+    normalized: list[dict] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        if isinstance(item, VarianteCatalogo):
+            item = item.model_dump()
+        if not isinstance(item, dict):
+            continue
+        codigo = _normalize_variant_code(item.get("codigo") or item.get("codigo_producto"))
+        if not codigo or codigo in seen:
+            continue
+        seen.add(codigo)
+        normalized.append({
+            "codigo": codigo,
+            "color": _normalize_variant_color(item.get("color") or item.get("color_variante")),
+            "precio_publico": float(item.get("precio_publico")) if item.get("precio_publico") not in (None, "") else None,
+            "costo_adquisicion": float(item.get("costo_adquisicion")) if item.get("costo_adquisicion") not in (None, "") else None,
+            "piezas_por_caja": int(item.get("piezas_por_caja")) if item.get("piezas_por_caja") not in (None, "") else None,
+        })
+    return normalized
+
+
+def _primary_variant(variantes: list[dict]) -> dict | None:
+    return variantes[0] if variantes else None
+
+
 def _normalizar_producto(p: dict) -> dict:
     slug = p.get("slug") or _slug_text(p.get("nombre") or "producto")
     imagenes_extra = _normalize_gallery(p.get("imagenes_extra"))
     foto_url = p.get("foto_url") if p.get("foto_url") is not None else p.get("imagen_url")
     if not foto_url and imagenes_extra:
         foto_url = imagenes_extra[0]
+    descripcion_limpia, variantes_catalogo = _extract_variantes_metadata(p.get("descripcion"))
+    primary_variant = _primary_variant(variantes_catalogo)
+    codigo_producto = p.get("codigo_producto") or (primary_variant.get("codigo") if primary_variant else None)
     return {
         "id": p.get("id"),
         "id_empresa": p.get("id_empresa"),
         "nombre": p.get("nombre") or "",
-        "descripcion": p.get("descripcion") or "",
-        "costo_adquisicion": p.get("costo_adquisicion") if p.get("costo_adquisicion") is not None else p.get("costo") or 0,
-        "precio": p.get("precio") if p.get("precio") is not None else p.get("precio_venta") or 0,
+        "descripcion": descripcion_limpia or "",
+        "costo_adquisicion": p.get("costo_adquisicion") if p.get("costo_adquisicion") is not None else p.get("costo") or (primary_variant.get("costo_adquisicion") if primary_variant else 0) or 0,
+        "precio": p.get("precio") if p.get("precio") is not None else p.get("precio_venta") or (primary_variant.get("precio_publico") if primary_variant else 0) or 0,
         "ubicacion": p.get("ubicacion") if p.get("ubicacion") is not None else p.get("ubicacion_producto"),
         "foto_url": foto_url,
         "categoria": p.get("categoria") or "Sin categoria",
-        "codigo_producto": p.get("codigo_producto"),
-        "precio_publico": p.get("precio_publico") if p.get("precio_publico") is not None else p.get("precio") if p.get("precio") is not None else p.get("precio_venta") or 0,
-        "piezas_por_caja": p.get("piezas_por_caja"),
+        "codigo_producto": codigo_producto,
+        "precio_publico": p.get("precio_publico") if p.get("precio_publico") is not None else p.get("precio") if p.get("precio") is not None else p.get("precio_venta") or (primary_variant.get("precio_publico") if primary_variant else 0) or 0,
+        "piezas_por_caja": p.get("piezas_por_caja") if p.get("piezas_por_caja") is not None else (primary_variant.get("piezas_por_caja") if primary_variant else None),
         "slug": slug,
         "visible_publico": p.get("visible_publico", True),
         "destacado": p.get("destacado", False),
         "origen_catalogo": p.get("origen_catalogo") or "manual",
         "imagenes_extra": imagenes_extra,
+        "variantes_catalogo": variantes_catalogo,
         "activo": p.get("activo", True),
         "fecha_creacion": p.get("fecha_creacion"),
     }
@@ -323,11 +413,13 @@ def crear_producto(datos: ProductoCreate, usuario=Depends(get_current_user)):
     id_empresa = _id_empresa(usuario)
     now = datetime.utcnow().isoformat()
     nombre = datos.nombre.strip()
-    descripcion = (datos.descripcion or "").strip() or None
+    variantes_catalogo = _normalize_variantes_catalogo(datos.variantes_catalogo)
+    primary_variant = _primary_variant(variantes_catalogo)
+    descripcion = _embed_variantes_metadata((datos.descripcion or "").strip() or None, variantes_catalogo)
     ubicacion = (datos.ubicacion or "").strip() or None
     foto_url = (datos.foto_url or "").strip() or None
     categoria = (datos.categoria or "").strip() or None
-    codigo_producto = (datos.codigo_producto or "").strip().upper() or None
+    codigo_producto = (datos.codigo_producto or "").strip().upper() or (primary_variant.get("codigo") if primary_variant else None)
     slug = _slug_text(datos.slug.strip()) if datos.slug else _slug_text(nombre)
     imagenes_extra = _normalize_gallery(datos.imagenes_extra)
     origen_catalogo = (datos.origen_catalogo or "manual").strip() or "manual"
@@ -337,13 +429,13 @@ def crear_producto(datos: ProductoCreate, usuario=Depends(get_current_user)):
         "id_empresa": id_empresa,
         "nombre": nombre,
         "descripcion": descripcion,
-        "costo_adquisicion": datos.costo_adquisicion,
-        "precio": datos.precio,
+        "costo_adquisicion": datos.costo_adquisicion if datos.costo_adquisicion is not None else (primary_variant.get("costo_adquisicion") if primary_variant else 0) or 0,
+        "precio": datos.precio if datos.precio is not None else (primary_variant.get("precio_publico") if primary_variant else 0) or 0,
         "ubicacion": ubicacion,
         "foto_url": foto_url,
         "categoria": categoria,
         "codigo_producto": codigo_producto,
-        "precio_publico": datos.precio,
+        "precio_publico": datos.precio if datos.precio is not None else (primary_variant.get("precio_publico") if primary_variant else 0) or 0,
         "slug": slug,
         "visible_publico": datos.visible_publico,
         "destacado": datos.destacado,
@@ -358,8 +450,8 @@ def crear_producto(datos: ProductoCreate, usuario=Depends(get_current_user)):
         "id_empresa": id_empresa,
         "nombre": nombre,
         "descripcion": descripcion,
-        "costo": datos.costo_adquisicion,
-        "precio_venta": datos.precio,
+        "costo": datos.costo_adquisicion if datos.costo_adquisicion is not None else (primary_variant.get("costo_adquisicion") if primary_variant else 0) or 0,
+        "precio_venta": datos.precio if datos.precio is not None else (primary_variant.get("precio_publico") if primary_variant else 0) or 0,
         "ubicacion_producto": ubicacion,
         "imagen_url": foto_url,
         "activo": True,
@@ -370,7 +462,7 @@ def crear_producto(datos: ProductoCreate, usuario=Depends(get_current_user)):
         "id": payload_full["id"],
         "id_empresa": id_empresa,
         "nombre": nombre,
-        "precio": datos.precio,
+        "precio": datos.precio if datos.precio is not None else (primary_variant.get("precio_publico") if primary_variant else 0) or 0,
         "fecha_creacion": now,
     }
 
@@ -414,8 +506,18 @@ def actualizar_producto(id_producto: str, datos: ProductoUpdate, usuario=Depends
     if datos.nombre is not None:
         base["nombre"] = datos.nombre.strip()
         nombre_actual = base["nombre"]
-    if datos.descripcion is not None:
-        base["descripcion"] = datos.descripcion.strip() or None
+    variantes_actuales = []
+    if actual.data:
+        current_full = supabase.table("productos").select("descripcion").eq("id", id_producto).eq("id_empresa", id_empresa).limit(1).execute()
+        if current_full.data:
+            _, variantes_actuales = _extract_variantes_metadata(current_full.data[0].get("descripcion"))
+
+    if datos.descripcion is not None or datos.variantes_catalogo is not None:
+        descripcion_base = datos.descripcion.strip() if datos.descripcion is not None else None
+        if descripcion_base is None and current_full.data:
+            descripcion_base, _ = _extract_variantes_metadata(current_full.data[0].get("descripcion"))
+        variantes_payload = _normalize_variantes_catalogo(datos.variantes_catalogo) if datos.variantes_catalogo is not None else variantes_actuales
+        base["descripcion"] = _embed_variantes_metadata(descripcion_base or None, variantes_payload)
     if datos.costo_adquisicion is not None:
         base["costo_adquisicion"] = datos.costo_adquisicion
     if datos.precio is not None:
@@ -426,8 +528,11 @@ def actualizar_producto(id_producto: str, datos: ProductoUpdate, usuario=Depends
         base["foto_url"] = datos.foto_url.strip() or None
     if datos.categoria is not None:
         base["categoria"] = datos.categoria.strip() or None
+    variantes_payload = _normalize_variantes_catalogo(datos.variantes_catalogo) if datos.variantes_catalogo is not None else variantes_actuales
     if datos.codigo_producto is not None:
-        base["codigo_producto"] = datos.codigo_producto.strip().upper() or None
+        base["codigo_producto"] = datos.codigo_producto.strip().upper() or (_primary_variant(variantes_payload).get("codigo") if _primary_variant(variantes_payload) else None)
+    elif datos.variantes_catalogo is not None:
+        base["codigo_producto"] = _primary_variant(variantes_payload).get("codigo") if _primary_variant(variantes_payload) else None
     if datos.slug is not None:
         base["slug"] = _slug_text(datos.slug.strip()) if datos.slug.strip() else _slug_text(nombre_actual)
     if datos.visible_publico is not None:

@@ -14,6 +14,8 @@ router = APIRouter(prefix="/ventas", tags=["Ventas"])
 class ItemVentaNueva(BaseModel):
     id_producto: str | None = None
     id_servicio: str | None = None
+    codigo_producto: str | None = None
+    color_variante: str | None = None
     cantidad: int = Field(gt=0)
     precio_unitario: float | None = Field(default=None, gt=0)
 
@@ -109,6 +111,7 @@ def _normalizar_detalle(det: dict, productos_map: dict[str, dict]) -> dict:
         "nombre_producto": det.get("nombre_producto") or (prod.get("nombre") if prod else None),
         "descripcion_producto": det.get("descripcion_producto") or (prod.get("descripcion") if prod else None),
         "codigo_producto": det.get("codigo_producto") or (prod.get("codigo_producto") if prod else None),
+        "color_variante": det.get("color_variante"),
         "foto_url": det.get("foto_url") or (prod.get("foto_url") if prod else prod.get("imagen_url") if prod else None),
     }
 
@@ -200,6 +203,31 @@ def _validar_stock_suficiente(id_empresa: str, id_sucursal: str, detalles: list[
 
     if faltantes:
         raise HTTPException(status_code=400, detail={"mensaje": "Stock insuficiente", "faltantes": faltantes})
+
+
+def _aplicar_snapshot_variantes(id_venta: str, detalles_solicitados: list[ItemVentaNueva], productos_map: dict[str, dict]):
+    detalles_db = (
+        supabase.table("detalle_ventas")
+        .select("id,id_producto,id_servicio")
+        .eq("id_venta", id_venta)
+        .execute()
+    ).data or []
+
+    for detalle_db, detalle_req in zip(detalles_db, detalles_solicitados):
+        prod = productos_map.get(detalle_req.id_producto) if detalle_req.id_producto else None
+        codigo = (detalle_req.codigo_producto or (prod.get("codigo_producto") if prod else None) or "").strip().upper() or None
+        color = (detalle_req.color_variante or "").strip() or None
+        payload = {
+            "codigo_producto": codigo,
+            "color_variante": color,
+        }
+        payload = {key: value for key, value in payload.items() if value is not None}
+        if not payload:
+            continue
+        try:
+            supabase.table("detalle_ventas").update(payload).eq("id", detalle_db.get("id")).execute()
+        except Exception:
+            continue
 
 
 def _ajustar_stock_si_no_lo_hizo_rpc(id_empresa: str, id_sucursal: str, detalles: list[dict], stock_antes: dict[str, int]):
@@ -431,6 +459,7 @@ def crear_venta_nueva(datos: VentaNueva, usuario=Depends(get_current_user)):
         }
 
     _actualizar_snapshot_detalles(id_venta, productos_map)
+    _aplicar_snapshot_variantes(id_venta, datos.detalles, productos_map)
     _ajustar_stock_si_no_lo_hizo_rpc(id_empresa, datos.id_sucursal, detalles_rpc, stock_antes)
     try:
         supabase.table("ventas").update({"origen_venta": datos.origen_venta or "fisica"}).eq("id", id_venta).execute()
