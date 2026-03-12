@@ -197,7 +197,9 @@ def _validar_stock_suficiente(id_empresa: str, id_sucursal: str, detalles: list[
     faltantes = []
     for id_producto, qty in por_producto.items():
         reg = inv_map.get(id_producto)
-        stock = int(reg.get("stock") or 0) if reg else 0
+        if not reg:
+            continue
+        stock = int(reg.get("stock") or 0)
         if stock < qty:
             faltantes.append({"id_producto": id_producto, "stock": stock, "requerido": qty})
 
@@ -540,4 +542,7 @@ def crear_venta_nueva(datos: VentaNueva, usuario=Depends(get_current_user)):
         "generar_pdf": datos.generar_pdf,
         "comprobante": comprobante,
     }
+
+
+
 
