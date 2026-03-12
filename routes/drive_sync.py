@@ -348,7 +348,43 @@ def _extract_name_from_text(text: str, filename: str, *, allow_filename_fallback
     return re.sub(r"[_-]+", " ", base).strip()[:140] or "Producto sin nombre"
 
 
-def _extract_catalog_name_near_index(lines: list[str], index: int, filename: str) -> str:
+def _variant_label_from_code(codigo_producto: str | None) -> str | None:
+    upper = _normalized_name_text(codigo_producto or "")
+    match = re.search(r"(?:^|-)0*(\d+)SEC(?:$|-)", upper)
+    if match:
+        cantidad = int(match.group(1))
+        return f"{cantidad} Secciones"
+    return None
+
+
+def _extract_catalog_variant_near_index(lines: list[str], index: int, codigo_producto: str | None) -> str | None:
+    start = max(0, index - 4)
+    end = min(len(lines), index + 2)
+    for pos in range(start, end):
+        line = re.sub(r"\s+", " ", (lines[pos] or "")).strip()
+        upper = _normalized_name_text(line)
+        if not upper:
+            continue
+        match = re.search(r"\b(\d+)\s+SECCIONES?\b", upper)
+        if match:
+            return f"{int(match.group(1))} Secciones"
+    return _variant_label_from_code(codigo_producto)
+
+
+def _compose_catalog_name(base_name: str, variant_label: str | None) -> str:
+    name = (base_name or "").strip() or "Producto sin nombre"
+    if not variant_label:
+        return name[:140]
+    normalized_name = _normalized_name_text(name)
+    normalized_variant = _normalized_name_text(variant_label)
+    if normalized_variant and normalized_variant in normalized_name:
+        return name[:140]
+    if name == "Producto sin nombre":
+        return variant_label[:140]
+    return f"{name} {variant_label}"[:140]
+
+
+def _extract_catalog_name_near_index(lines: list[str], index: int, filename: str, codigo_producto: str | None = None) -> str:
     start = max(0, index - 8)
     end = min(len(lines), index + 3)
     ranked = []
@@ -369,9 +405,12 @@ def _extract_catalog_name_near_index(lines: list[str], index: int, filename: str
         ranked.append((score, -distance, -pos, line))
     if ranked:
         ranked.sort(reverse=True)
-        return ranked[0][3].title()[:140]
-    window = "\n".join(lines[start:end])
-    return _extract_name_from_text(window, filename, allow_filename_fallback=False)
+        base_name = ranked[0][3].title()[:140]
+    else:
+        window = "\n".join(lines[start:end])
+        base_name = _extract_name_from_text(window, filename, allow_filename_fallback=False)
+    variant_label = _extract_catalog_variant_near_index(lines, index, codigo_producto)
+    return _compose_catalog_name(base_name, variant_label)
 
 
 def _extract_pdf_text(file_bytes: bytes) -> str:
@@ -551,9 +590,9 @@ def _extract_catalog_items_from_text(text: str, filename: str, file_id: str) -> 
         precio_publico = _extract_price_from_text(block_text)
         if precio_publico in (None, ""):
             continue
-        nombre = _extract_catalog_name_near_index(lines, index, filename)
-        descripcion = _description_from_lines(block_lines)
         codigo_producto = _extract_code_from_text(block_text, "")
+        nombre = _extract_catalog_name_near_index(lines, index, filename, codigo_producto)
+        descripcion = _description_from_lines(block_lines)
         piezas_por_caja = _extract_pieces_from_text(block_text)
         item = {
             "codigo_producto": codigo_producto,
