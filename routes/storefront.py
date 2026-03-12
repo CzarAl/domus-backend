@@ -68,6 +68,25 @@ def _storefront_config():
     }
 
 
+def _public_storefront_product(producto: dict) -> dict:
+    return {
+        "id": producto.get("id"),
+        "nombre": producto.get("nombre"),
+        "descripcion": producto.get("descripcion"),
+        "precio": producto.get("precio"),
+        "precio_publico": producto.get("precio_publico") if producto.get("precio_publico") is not None else producto.get("precio"),
+        "foto_url": producto.get("foto_url"),
+        "categoria": producto.get("categoria"),
+        "codigo_producto": producto.get("codigo_producto"),
+        "piezas_por_caja": producto.get("piezas_por_caja"),
+        "slug": producto.get("slug"),
+        "destacado": producto.get("destacado"),
+        "visible_publico": producto.get("visible_publico", True),
+        "origen_catalogo": producto.get("origen_catalogo"),
+        "imagenes_extra": producto.get("imagenes_extra") or [],
+    }
+
+
 @router.get("/config")
 def storefront_config():
     return _storefront_config()
@@ -87,7 +106,7 @@ def storefront_productos():
     )
 
     productos = [_normalizar_producto(item) for item in (resp.data or [])]
-    productos_publicos = [item for item in productos if item.get("visible_publico", True)]
+    productos_publicos = [_public_storefront_product(item) for item in productos if item.get("visible_publico", True)]
     categorias = sorted({item.get("categoria") or "Sin categoria" for item in productos_publicos})
 
     return {
@@ -113,7 +132,7 @@ def storefront_producto_detalle(slug_or_id: str):
         if not producto.get("visible_publico", True):
             continue
         if producto.get("id") == slug_or_id or producto.get("slug") == slug_or_id:
-            return producto
+            return _public_storefront_product(producto)
 
     raise HTTPException(status_code=404, detail="Producto no encontrado")
 

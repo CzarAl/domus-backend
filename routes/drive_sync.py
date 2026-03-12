@@ -164,22 +164,62 @@ def _drive_download_file(file_id: str, access_token: str) -> bytes:
         return response.read()
 
 
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    ordered = []
+    seen = set()
+    for value in values:
+        clean = (value or "").strip()
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        ordered.append(clean)
+    return ordered
+
+
+def _clean_compact_code(value: str | None) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (value or "").upper())
+
+
 def _extract_price_from_text(text: str) -> float | None:
     if not text:
         return None
-    patterns = [
-        r"(?:precio|venta|publico|p/pza|pza\.)[^0-9$]{0,8}\$?\s*([0-9][0-9,.]{0,12})",
-        r"\$\s*([0-9][0-9,.]{0,12})",
-    ]
-    for pattern in patterns:
-        matches = re.findall(pattern, text, flags=re.IGNORECASE)
-        for raw in matches:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in (text or "").splitlines()]
+    lines = [line for line in lines if line]
+    candidates = []
+
+    for index, line in enumerate(lines[:80]):
+        for raw in re.findall(r"\$\s*([0-9][0-9,.]{0,12})", line, flags=re.IGNORECASE):
             try:
                 value = float(raw.replace(",", ""))
             except Exception:
                 continue
-            if 1 <= value <= 1000000:
-                return round(value, 2)
+            if not (1 <= value <= 1000000):
+                continue
+            score = 5
+            upper_line = line.upper()
+            if "PUBLIC" in upper_line:
+                score += 8
+            if "PRECIO" in upper_line or "VENTA" in upper_line:
+                score += 5
+            if "P/PZA" in upper_line or "PZA." in upper_line:
+                score += 3
+            if "DISTRIBUIDOR" in upper_line or "COSTO" in upper_line:
+                score -= 7
+            if index < 20:
+                score += 2
+            candidates.append((score, value))
+
+    if candidates:
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return round(candidates[0][1], 2)
+
+    for raw in re.findall(r"\$\s*([0-9][0-9,.]{0,12})", text, flags=re.IGNORECASE):
+        try:
+            value = float(raw.replace(",", ""))
+        except Exception:
+            continue
+        if 1 <= value <= 1000000:
+            return round(value, 2)
     return None
 
 
@@ -189,24 +229,51 @@ def _extract_pieces_from_text(text: str) -> int | None:
 
 
 def _extract_code_from_text(text: str, filename: str) -> str | None:
-    match = re.search(r"\b[A-Z]{1,4}-\d{2,4}-[A-Z0-9]{2,10}\b", text or "")
-    if match:
-        return match.group(0).upper()
-    match = re.search(r"\b[A-Z]{1,4}-\d{2,4}-[A-Z0-9]{2,10}\b", filename or "")
-    if match:
-        return match.group(0).upper()
-    return None
+    ranked: list[tuple[int, str]] = []
+    lines = [re.sub(r"\s+", " ", line).strip() for line in (text or "").splitlines()]
+    lines = [line for line in lines if line]
+
+    labeled_patterns = [
+        r"(?:CODIGO|CLAVE|MODELO|SKU|REF(?:ERENCIA)?)[:#\s-]{0,6}([A-Z0-9][A-Z0-9\-\s]{2,40})",
+    ]
+    for index, line in enumerate(lines[:80]):
+        for pattern in labeled_patterns:
+            for raw in re.findall(pattern, line.upper()):
+                candidate = _normalize_code_candidate(raw)
+                if candidate:
+                    ranked.append((12 + _code_score(candidate) - min(index, 8), candidate))
+
+        for candidate in _extract_code_candidates(line):
+            bonus = 0
+            if re.search(r"CODIGO|CLAVE|MODELO|SKU|REF", line, flags=re.IGNORECASE):
+                bonus += 5
+            if index < 12:
+                bonus += 2
+            ranked.append((_code_score(candidate) + bonus, candidate))
+
+    for candidate in _extract_code_candidates((filename or "").upper()):
+        ranked.append((_code_score(candidate) + 1, candidate))
+
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (item[0], len(item[1]), item[1]), reverse=True)
+    return ranked[0][1]
 
 
 def _extract_name_from_text(text: str, filename: str) -> str:
     if text:
-        for raw in text.splitlines():
+        for raw in text.splitlines()[:40]:
             line = re.sub(r"\s+", " ", raw).strip()
+            upper = line.upper()
             if len(line) < 4:
                 continue
-            if "TEPEYAC" in line.upper():
+            if "TEPEYAC" in upper or "CATALOGO" in upper:
                 continue
-            if re.fullmatch(r"[A-Z0-9-]{4,}", line):
+            if "$" in line or re.search(r"\b\d{2,}[.,]?\d*\b", line):
+                continue
+            if re.search(r"CODIGO|CLAVE|MODELO|SKU|PIEZAS|MEDIDAS|COLOR", upper):
+                continue
+            if re.fullmatch(r"[A-Z0-9-]{4,}", upper):
                 continue
             return line.title()[:140]
     base = os.path.splitext(filename or "")[0]
@@ -333,8 +400,109 @@ def _extract_pdf_info_from_text(text: str, filename: str) -> dict:
     }
 
 
-def _extract_pdf_info(file_bytes: bytes, filename: str) -> dict:
-    return _extract_pdf_info_from_text(_extract_pdf_text(file_bytes), filename)
+def _description_from_lines(lines: list[str]) -> str | None:
+    parts = []
+    for raw in lines:
+        line = re.sub(r"\s+", " ", raw).strip()
+        upper = line.upper()
+        if len(line) < 5:
+            continue
+        if "$" in line:
+            continue
+        if re.search(r"CODIGO|CLAVE|MODELO|SKU|REF|PIEZAS|MEDIDAS|COLOR|PRECIO|PUBLICO|VENTA", upper):
+            continue
+        if re.fullmatch(r"[A-Z0-9\-]{4,}", upper):
+            continue
+        parts.append(line)
+    if not parts:
+        return None
+    return " ".join(_dedupe_keep_order(parts))[:1200]
+
+
+def _candidate_key_for_item(file_id: str, data: dict, index: int) -> str:
+    code = _canonical_code(data.get("codigo_producto"))
+    if code:
+        suffix = code
+    else:
+        name_slug = _slug_text(data.get("nombre") or f"item-{index + 1}")
+        price = data.get("precio_publico")
+        price_key = "sin-precio"
+        try:
+            if price not in (None, ""):
+                price_key = str(int(round(float(price) * 100)))
+        except Exception:
+            price_key = "sin-precio"
+        suffix = f"{name_slug}-{price_key}"
+    return f"{file_id}::item::{suffix[:120]}"
+
+
+def _extract_catalog_items_from_text(text: str, filename: str, file_id: str) -> list[dict]:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in (text or "").splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        fallback = _extract_pdf_info_from_text(text, filename)
+        fallback["candidate_key"] = _candidate_key_for_item(file_id, fallback, 0)
+        fallback["orden_detectado"] = 0
+        return [fallback]
+
+    candidates = {}
+    order = 0
+    for index, line in enumerate(lines):
+        joined_prices = re.findall(r"\$\s*([0-9][0-9,.]{0,12})", line, flags=re.IGNORECASE)
+        if not joined_prices:
+            continue
+        block_lines = lines[max(0, index - 3): min(len(lines), index + 4)]
+        block_text = "\n".join(block_lines)
+        precio_publico = _extract_price_from_text(block_text)
+        if precio_publico in (None, ""):
+            continue
+        nombre = _extract_name_from_text("\n".join(lines[max(0, index - 3): min(len(lines), index + 2)]), filename)
+        descripcion = _description_from_lines(block_lines)
+        codigo_producto = _extract_code_from_text(block_text, "")
+        piezas_por_caja = _extract_pieces_from_text(block_text)
+        item = {
+            "codigo_producto": codigo_producto,
+            "nombre": nombre,
+            "precio_publico": precio_publico,
+            "piezas_por_caja": piezas_por_caja,
+            "descripcion": descripcion,
+            "orden_detectado": order,
+        }
+        candidate_key = _candidate_key_for_item(file_id, item, order)
+        item["candidate_key"] = candidate_key
+        item["codigo_normalizado"] = _canonical_code(codigo_producto)
+        quality = 0
+        if codigo_producto:
+            quality += 5 + _code_score(codigo_producto)
+        if nombre and nombre != "Producto sin nombre":
+            quality += 4
+        if descripcion:
+            quality += 2
+        if piezas_por_caja:
+            quality += 1
+        existing = candidates.get(candidate_key)
+        if not existing or quality > existing.get("_quality", -1):
+            item["_quality"] = quality
+            candidates[candidate_key] = item
+        order += 1
+
+    results = list(candidates.values())
+    results.sort(key=lambda item: item.get("orden_detectado", 0))
+    for item in results:
+        item.pop("_quality", None)
+
+    if results:
+        return results
+
+    fallback = _extract_pdf_info_from_text(text, filename)
+    fallback["candidate_key"] = _candidate_key_for_item(file_id, fallback, 0)
+    fallback["codigo_normalizado"] = _canonical_code(fallback.get("codigo_producto"))
+    fallback["orden_detectado"] = 0
+    return [fallback]
+
+
+def _extract_catalog_items(file_bytes: bytes, filename: str, file_id: str) -> list[dict]:
+    return _extract_catalog_items_from_text(_extract_pdf_text(file_bytes), filename, file_id)
 
 
 def _scan_drive(folder_id: str, access_token: str) -> tuple[list[dict], list[dict], list[dict]]:
@@ -363,6 +531,17 @@ def _signature(item: dict) -> str:
         item.get("mimeType") or "",
         str(item.get("size") or ""),
         item.get("modifiedTime") or "",
+    ])
+
+
+def _item_signature(item: dict, proposed: dict, candidate_key: str) -> str:
+    return "|".join([
+        _signature(item),
+        candidate_key,
+        str(proposed.get("codigo_normalizado") or ""),
+        str(proposed.get("nombre") or ""),
+        str(proposed.get("precio_publico") or ""),
+        str(proposed.get("piezas_por_caja") or ""),
     ])
 
 
@@ -443,102 +622,131 @@ def sync_drive(datos: DriveSyncRequest, usuario=Depends(get_current_user)):
     _, _, archivos = _scan_drive(config["folder_id"], access_token)
 
     existing_resp = supabase.table("catalogo_drive_items").select("*").eq("id_empresa", id_empresa).eq("id_fuente", fuente["id"]).execute()
-    existing_map = {item["drive_file_id"]: item for item in (existing_resp.data or [])}
+    existing_items = existing_resp.data or []
+    existing_map = {item["drive_file_id"]: item for item in existing_items}
+    legacy_map: dict[str, list[dict]] = {}
+    for stored_item in existing_items:
+        extracted = stored_item.get("extracted_data") or {}
+        real_file_id = (extracted.get("drive_file_real_id") or stored_item.get("drive_file_id") or "").split("::item::", 1)[0]
+        if real_file_id:
+            legacy_map.setdefault(real_file_id, []).append(stored_item)
     seen = set()
     resumen = {"nuevos": 0, "actualizados": 0, "precios_modificados": 0, "removidos": 0, "sin_cambios": 0}
 
     for item in archivos:
-        seen.add(item["id"])
-        existing = existing_map.get(item["id"])
-        info = {}
+        extraction_source = "filename"
+        catalog_items = []
         if item.get("mimeType") == "application/pdf":
             try:
                 pdf_bytes = _drive_download_file(item["id"], access_token)
-                info = _extract_pdf_info(pdf_bytes, item.get("name") or "")
-                if not info.get("codigo_producto") or info.get("precio_publico") in (None, ""):
-                    try:
-                        ocr_text = _vision_ocr_pdf(pdf_bytes, item.get("name") or "catalogo.pdf", google_config)
-                        if ocr_text.strip():
-                            info = _extract_pdf_info_from_text(ocr_text, item.get("name") or "")
-                    except Exception:
-                        pass
+                catalog_items, ocr_usado, extraction_source = _extract_catalog_items_with_optional_ocr(
+                    pdf_bytes,
+                    item.get("name") or "catalogo.pdf",
+                    google_config,
+                    item["id"],
+                )
             except Exception:
-                info = _extract_pdf_info(b"", item.get("name") or "")
+                fallback = _extract_pdf_info_from_text("", item.get("name") or "")
+                fallback["candidate_key"] = _candidate_key_for_item(item["id"], fallback, 0)
+                fallback["orden_detectado"] = 0
+                catalog_items = [fallback]
+                extraction_source = "filename"
         else:
-            info = {
+            fallback = {
                 "codigo_producto": _extract_code_from_text("", item.get("name") or ""),
                 "nombre": _extract_name_from_text("", item.get("name") or ""),
                 "precio_publico": None,
                 "piezas_por_caja": None,
                 "descripcion": None,
+                "candidate_key": _candidate_key_for_item(item["id"], {"nombre": item.get("name") or ""}, 0),
+                "orden_detectado": 0,
             }
+            catalog_items = [fallback]
 
-        proposed = {
-            "codigo_producto": info.get("codigo_producto"),
-            "nombre": info.get("nombre"),
-            "categoria": item.get("categoria") or "Sin categoria",
-            "precio_publico": info.get("precio_publico"),
-            "piezas_por_caja": info.get("piezas_por_caja"),
-            "descripcion": info.get("descripcion"),
-            "mime_type": item.get("mimeType"),
-            "web_view_link": item.get("webViewLink"),
-        }
-        sign = _signature(item)
+        for index, info in enumerate(catalog_items):
+            candidate_key = info.get("candidate_key") or _candidate_key_for_item(item["id"], info, index)
+            seen.add(candidate_key)
+            existing = existing_map.get(candidate_key)
+            if not existing:
+                legacy_candidates = legacy_map.get(item["id"], [])
+                if len(legacy_candidates) == 1 and len(catalog_items) == 1:
+                    existing = legacy_candidates[0]
 
-        if not existing:
-            payload = {
-                "id": str(uuid.uuid4()),
-                "id_empresa": id_empresa,
-                "id_fuente": fuente["id"],
-                "drive_file_id": item["id"],
-                "drive_parent_id": None,
-                "drive_parent_name": item.get("categoria") or "Sin categoria",
+            proposed = {
+                "candidate_key": candidate_key,
+                "drive_file_real_id": item["id"],
+                "codigo_producto": info.get("codigo_producto"),
+                "codigo_normalizado": _canonical_code(info.get("codigo_producto")),
+                "nombre": info.get("nombre"),
+                "categoria": item.get("categoria") or "Sin categoria",
+                "precio_publico": info.get("precio_publico"),
+                "piezas_por_caja": info.get("piezas_por_caja"),
+                "descripcion": info.get("descripcion"),
+                "mime_type": item.get("mimeType"),
+                "web_view_link": item.get("webViewLink"),
+                "origen_extraccion": extraction_source,
+                "orden_detectado": info.get("orden_detectado", index),
+            }
+            proposed["motivos_revision"] = _build_public_revision_flags(proposed, extraction_source=extraction_source)
+            proposed["requiere_revision"] = bool(proposed["motivos_revision"])
+            sign = _item_signature(item, proposed, candidate_key)
+
+            if not existing:
+                payload = {
+                    "id": str(uuid.uuid4()),
+                    "id_empresa": id_empresa,
+                    "id_fuente": fuente["id"],
+                    "drive_file_id": candidate_key,
+                    "drive_parent_id": None,
+                    "drive_parent_name": item.get("categoria") or "Sin categoria",
+                    "categoria": item.get("categoria") or "Sin categoria",
+                    "nombre_archivo": item.get("name"),
+                    "mime_type": item.get("mimeType"),
+                    "web_view_link": item.get("webViewLink"),
+                    "modified_time": item.get("modifiedTime"),
+                    "size_bytes": int(item.get("size") or 0),
+                    "signature": sign,
+                    "extracted_data": proposed,
+                    "estado_sync": "vigente",
+                    "last_seen_at": _utcnow(),
+                    "synced_at": _utcnow(),
+                    "fecha_creacion": _utcnow(),
+                }
+                created = supabase.table("catalogo_drive_items").insert(payload).execute()
+                item_record = created.data[0]
+                titulo_producto = proposed.get("nombre") or item.get("name") or "Producto sin nombre"
+                _upsert_revision(id_empresa, fuente["id"], item_record, "nuevo", f"Nuevo producto detectado: {titulo_producto}", "Se detecto un producto nuevo dentro del catalogo del proveedor pendiente de revision.", {}, proposed)
+                resumen["nuevos"] += 1
+                continue
+
+            update_payload = {
                 "categoria": item.get("categoria") or "Sin categoria",
                 "nombre_archivo": item.get("name"),
                 "mime_type": item.get("mimeType"),
                 "web_view_link": item.get("webViewLink"),
                 "modified_time": item.get("modifiedTime"),
                 "size_bytes": int(item.get("size") or 0),
-                "signature": sign,
-                "extracted_data": proposed,
-                "estado_sync": "vigente",
                 "last_seen_at": _utcnow(),
                 "synced_at": _utcnow(),
-                "fecha_creacion": _utcnow(),
             }
-            created = supabase.table("catalogo_drive_items").insert(payload).execute()
-            item_record = created.data[0]
-            _upsert_revision(id_empresa, fuente["id"], item_record, "nuevo", f"Nuevo producto detectado: {payload['nombre_archivo']}", "Se detecto un archivo nuevo en Drive pendiente de revision.", {}, proposed)
-            resumen["nuevos"] += 1
-            continue
+            if existing.get("signature") == sign:
+                supabase.table("catalogo_drive_items").update(update_payload).eq("id", existing["id"]).execute()
+                resumen["sin_cambios"] += 1
+                continue
 
-        update_payload = {
-            "categoria": item.get("categoria") or "Sin categoria",
-            "nombre_archivo": item.get("name"),
-            "mime_type": item.get("mimeType"),
-            "web_view_link": item.get("webViewLink"),
-            "modified_time": item.get("modifiedTime"),
-            "size_bytes": int(item.get("size") or 0),
-            "last_seen_at": _utcnow(),
-            "synced_at": _utcnow(),
-        }
-        if existing.get("signature") == sign:
-            supabase.table("catalogo_drive_items").update(update_payload).eq("id", existing["id"]).execute()
-            resumen["sin_cambios"] += 1
-            continue
+            tipo = "actualizado"
+            anterior = existing.get("extracted_data") or {}
+            if anterior.get("precio_publico") not in (None, "") and proposed.get("precio_publico") not in (None, "") and float(anterior.get("precio_publico")) != float(proposed.get("precio_publico")):
+                tipo = "precio_modificado"
+                resumen["precios_modificados"] += 1
+            else:
+                resumen["actualizados"] += 1
 
-        tipo = "actualizado"
-        anterior = existing.get("extracted_data") or {}
-        if anterior.get("precio_publico") not in (None, "") and proposed.get("precio_publico") not in (None, "") and float(anterior.get("precio_publico")) != float(proposed.get("precio_publico")):
-            tipo = "precio_modificado"
-            resumen["precios_modificados"] += 1
-        else:
-            resumen["actualizados"] += 1
-
-        update_payload.update({"signature": sign, "extracted_data": proposed, "estado_sync": "vigente"})
-        updated = supabase.table("catalogo_drive_items").update(update_payload).eq("id", existing["id"]).execute()
-        item_record = updated.data[0] if updated.data else {**existing, **update_payload}
-        _upsert_revision(id_empresa, fuente["id"], item_record, tipo, f"Cambio detectado en {item.get('name')}", "Se detecto un cambio en el catalogo del proveedor.", anterior, proposed)
+            update_payload.update({"signature": sign, "extracted_data": proposed, "estado_sync": "vigente", "drive_file_id": candidate_key})
+            updated = supabase.table("catalogo_drive_items").update(update_payload).eq("id", existing["id"]).execute()
+            item_record = updated.data[0] if updated.data else {**existing, **update_payload}
+            titulo_producto = proposed.get("nombre") or item.get("name") or "Producto sin nombre"
+            _upsert_revision(id_empresa, fuente["id"], item_record, tipo, f"Cambio detectado en {titulo_producto}", "Se detecto un cambio en el catalogo del proveedor.", anterior, proposed)
 
     for drive_file_id, item in existing_map.items():
         if drive_file_id in seen:
@@ -577,26 +785,67 @@ def listar_revisiones(usuario=Depends(get_current_user)):
         proposed = revision.get("datos_propuestos") or {}
         previous = revision.get("datos_anteriores") or {}
         codigo = (proposed.get("codigo_producto") or previous.get("codigo_producto") or "").strip().upper() or None
+        costo = costos_map.get(codigo) if codigo else None
+        precio_base = proposed.get("precio_publico")
+        if precio_base in (None, ""):
+            precio_base = previous.get("precio_publico") or previous.get("precio")
+        utilidad_estimada = None
+        margen_estimado = None
+        if costo and precio_base not in (None, ""):
+            try:
+                precio_num = float(precio_base)
+                costo_num = float(costo.get("costo_adquisicion") or 0)
+                utilidad_estimada = round(precio_num - costo_num, 2)
+                margen_estimado = round((utilidad_estimada / precio_num) * 100, 2) if precio_num else None
+            except Exception:
+                utilidad_estimada = None
+                margen_estimado = None
+
+        motivos = []
+        for source in [previous.get("motivos_revision") or [], proposed.get("motivos_revision") or []]:
+            for item in source:
+                if item:
+                    motivos.append(str(item).strip())
+        if codigo and not costo:
+            motivos.append("No hay costo interno ligado para este codigo.")
+
         salida.append({
             **revision,
             "drive_item": items_map.get(revision.get("drive_item_id"), {}),
-            "costo_registrado": costos_map.get(codigo) if codigo else None,
+            "costo_registrado": costo,
+            "codigo_normalizado": proposed.get("codigo_normalizado") or previous.get("codigo_normalizado") or _canonical_code(codigo),
+            "codigo_costo_ligado": costo.get("codigo_producto") if costo else None,
+            "motivos_revision": _dedupe_keep_order(motivos),
+            "requiere_revision": bool(_dedupe_keep_order(motivos)),
+            "origen_extraccion": proposed.get("origen_extraccion") or previous.get("origen_extraccion"),
+            "utilidad_estimada": utilidad_estimada,
+            "margen_estimado": margen_estimado,
         })
     return {"pendientes": salida}
 
 def _buscar_costo(id_empresa: str, codigo_producto: str | None):
     if not codigo_producto:
         return None
-    resp = supabase.table("catalogo_costos_proveedor").select("*").eq("id_empresa", id_empresa).eq("codigo_producto", codigo_producto).limit(1).execute()
-    return resp.data[0] if resp.data else None
+    codigo = codigo_producto.strip().upper()
+    resp = supabase.table("catalogo_costos_proveedor").select("*").eq("id_empresa", id_empresa).eq("codigo_producto", codigo).limit(1).execute()
+    if resp.data:
+        return resp.data[0]
+    fallback = supabase.table("catalogo_costos_proveedor").select("*").eq("id_empresa", id_empresa).execute()
+    return _pick_best_row_by_code(codigo, fallback.data or [])
 
 
 def _buscar_costos(id_empresa: str, codigos: list[str]) -> dict[str, dict]:
     clean = [codigo.strip().upper() for codigo in codigos if codigo and codigo.strip()]
     if not clean:
         return {}
-    resp = supabase.table("catalogo_costos_proveedor").select("*").eq("id_empresa", id_empresa).in_("codigo_producto", list(set(clean))).execute()
-    return {item["codigo_producto"]: item for item in (resp.data or []) if item.get("codigo_producto")}
+    resp = supabase.table("catalogo_costos_proveedor").select("*").eq("id_empresa", id_empresa).execute()
+    rows = resp.data or []
+    resultados = {}
+    for codigo in clean:
+        match = _pick_best_row_by_code(codigo, rows)
+        if match:
+            resultados[codigo] = match
+    return resultados
 
 
 def _guardar_costo(id_empresa: str, codigo_producto: str, costo_adquisicion: float, proveedor: str | None, notas: str | None = None):
@@ -681,6 +930,15 @@ def _normalize_code_candidate(raw: str) -> str | None:
 
     if len(parts) == 1:
         single = _normalize_alnum_segment(parts[0])
+        for index, char in enumerate(single):
+            if index < 2:
+                continue
+            if char.isdigit() or char in {"O", "Q", "D", "I", "L", "S", "B", "Z"}:
+                prefix = _normalize_letters_segment(single[:index])
+                suffix = _normalize_digits_segment(single[index:])
+                if re.fullmatch(r"[A-Z]{2,6}", prefix) and re.fullmatch(r"\d{2,6}", suffix):
+                    return prefix + suffix
+                break
         if re.fullmatch(r"[A-Z]{2,6}\d{2,6}", _normalize_letters_segment(single[:6]) + _normalize_digits_segment(single[6:])):
             return single
         if re.fullmatch(r"\d{3,6}", _normalize_digits_segment(single)):
@@ -857,11 +1115,172 @@ def _build_import_warnings(rows: list[dict], *, ocr_usado: bool, review_rows: li
     return warnings
 
 
+def _merge_catalog_items(base_items: list[dict], extra_items: list[dict], *, file_id: str) -> list[dict]:
+    if not base_items:
+        return extra_items
+    if not extra_items:
+        return base_items
+
+    merged = []
+    used_extra_keys = set()
+    for index, base_item in enumerate(base_items):
+        match = _pick_best_row_by_code(base_item.get("codigo_producto"), extra_items) or (extra_items[index] if index < len(extra_items) else None)
+        merged_item = dict(base_item)
+        if match:
+            used_extra_keys.add(match.get("candidate_key") or _candidate_key_for_item(file_id, match, index))
+            if match.get("codigo_producto") and (
+                not merged_item.get("codigo_producto")
+                or _code_score(match.get("codigo_producto") or "") > _code_score(merged_item.get("codigo_producto") or "")
+            ):
+                merged_item["codigo_producto"] = match.get("codigo_producto")
+            if match.get("precio_publico") not in (None, "") and merged_item.get("precio_publico") in (None, ""):
+                merged_item["precio_publico"] = match.get("precio_publico")
+            if match.get("nombre") and (not merged_item.get("nombre") or merged_item.get("nombre") == "Producto sin nombre"):
+                merged_item["nombre"] = match.get("nombre")
+            if match.get("piezas_por_caja") and not merged_item.get("piezas_por_caja"):
+                merged_item["piezas_por_caja"] = match.get("piezas_por_caja")
+            if match.get("descripcion") and (not merged_item.get("descripcion") or len(match.get("descripcion") or "") > len(merged_item.get("descripcion") or "")):
+                merged_item["descripcion"] = match.get("descripcion")
+        merged.append(merged_item)
+
+    for extra_index, extra_item in enumerate(extra_items):
+        extra_key = extra_item.get("candidate_key") or _candidate_key_for_item(file_id, extra_item, extra_index)
+        if extra_key in used_extra_keys:
+            continue
+        merged.append(extra_item)
+    return merged
+
+
+def _extract_catalog_items_with_optional_ocr(file_bytes: bytes, filename: str, google_config: dict, file_id: str) -> tuple[list[dict], bool, str | None]:
+    texto_pdf = _extract_pdf_text(file_bytes)
+    ocr_usado = False
+    extraction_source = "filename"
+    items = []
+
+    if texto_pdf.strip():
+        items = _extract_catalog_items_from_text(texto_pdf, filename, file_id)
+        extraction_source = "pdf_text"
+
+    needs_ocr = not texto_pdf.strip() or not items or any(not row.get("codigo_producto") or row.get("precio_publico") in (None, "") for row in items)
+    if needs_ocr:
+        try:
+            ocr_text = _vision_ocr_pdf(file_bytes, filename, google_config)
+            if ocr_text.strip():
+                ocr_usado = True
+                ocr_items = _extract_catalog_items_from_text(ocr_text, filename, file_id)
+                items = _merge_catalog_items(items, ocr_items, file_id=file_id) if items else ocr_items
+                extraction_source = "ocr"
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    if not items:
+        fallback = _extract_pdf_info_from_text("", filename)
+        fallback["candidate_key"] = _candidate_key_for_item(file_id, fallback, 0)
+        fallback["codigo_normalizado"] = _canonical_code(fallback.get("codigo_producto"))
+        fallback["orden_detectado"] = 0
+        items = [fallback]
+
+    for index, item in enumerate(items):
+        item.setdefault("candidate_key", _candidate_key_for_item(file_id, item, index))
+        item["codigo_normalizado"] = _canonical_code(item.get("codigo_producto"))
+    return items, ocr_usado, extraction_source
+
+
+def _build_public_catalog_warnings(items: list[dict], *, ocr_usado: bool) -> list[str]:
+    warnings = []
+    if ocr_usado and len(items) < 3:
+        warnings.append("Cobertura baja: OCR detecto pocos articulos para un catalogo publico; valida manualmente el PDF.")
+    missing_price = [item for item in items if item.get("precio_publico") in (None, "")]
+    if missing_price:
+        warnings.append(f"Hay {len(missing_price)} articulos sin precio_publico detectado.")
+    weak_names = [item for item in items if not item.get("nombre") or item.get("nombre") == "Producto sin nombre"]
+    if weak_names:
+        warnings.append(f"Hay {len(weak_names)} articulos con nombre debil o incompleto.")
+    short_codes = [item.get("codigo_producto") for item in items if _row_requires_review({"codigo_producto": item.get("codigo_producto")}) and item.get("codigo_producto")]
+    if short_codes:
+        sample = ", ".join(short_codes[:5])
+        warnings.append(f"Hay codigos ambiguos o cortos que requieren revision: {sample}.")
+    return warnings
+
+
+def _canonical_code(value: str | None) -> str | None:
+    raw = (value or "").strip().upper()
+    if not raw:
+        return None
+    normalized = _normalize_code_candidate(raw)
+    if normalized:
+        return normalized
+    compact = _clean_compact_code(raw)
+    return compact or None
+
+
+def _code_lookup_keys(value: str | None) -> list[str]:
+    raw = (value or "").strip().upper()
+    canonical = _canonical_code(raw)
+    compact_raw = _clean_compact_code(raw)
+    compact_canonical = _clean_compact_code(canonical)
+    return _dedupe_keep_order([raw, canonical or "", compact_raw, compact_canonical])
+
+
+def _pick_best_row_by_code(code: str | None, rows: list[dict], *, field: str = "codigo_producto") -> dict | None:
+    requested_canonical = _canonical_code(code)
+    lookup_keys = set(_code_lookup_keys(code))
+    if not lookup_keys:
+        return None
+
+    best = None
+    best_score = -1
+    for row in rows:
+        row_code = row.get(field)
+        row_keys = set(_code_lookup_keys(row_code))
+        if not row_keys:
+            continue
+        overlap = lookup_keys & row_keys
+        if not overlap:
+            continue
+        canonical = _canonical_code(row_code) or ""
+        score = len(overlap) * 10
+        if requested_canonical and canonical == requested_canonical:
+            score += 8
+        if canonical:
+            score += _code_score(canonical)
+        if best is None or score > best_score:
+            best = row
+            best_score = score
+    return best
+
+
+def _build_public_revision_flags(proposed: dict, *, extraction_source: str) -> list[str]:
+    flags = []
+    codigo = (proposed.get("codigo_producto") or "").strip().upper()
+    precio = proposed.get("precio_publico")
+    nombre = (proposed.get("nombre") or "").strip()
+    if not codigo:
+        flags.append("No se detecto codigo_producto.")
+    elif _row_requires_review({"codigo_producto": codigo}):
+        flags.append("El codigo detectado parece corto o ambiguo; revisar antes de publicar.")
+    if precio in (None, ""):
+        flags.append("No se detecto precio_publico.")
+    if not nombre or nombre.lower() == "producto sin nombre":
+        flags.append("No se detecto un nombre limpio del producto.")
+    if extraction_source == "filename":
+        flags.append("La extraccion dependio del nombre del archivo; valida codigo, nombre y precio.")
+    if extraction_source == "ocr":
+        flags.append("Se uso OCR para leer el catalogo; confirma los campos detectados.")
+    return flags
+
+
 def _buscar_producto_por_codigo(id_empresa: str, codigo_producto: str | None):
     if not codigo_producto:
         return None
-    resp = supabase.table("productos").select("id").eq("id_empresa", id_empresa).eq("codigo_producto", codigo_producto).limit(1).execute()
-    return resp.data[0] if resp.data else None
+    codigo = codigo_producto.strip().upper()
+    resp = supabase.table("productos").select("id,codigo_producto").eq("id_empresa", id_empresa).eq("codigo_producto", codigo).limit(1).execute()
+    if resp.data:
+        return resp.data[0]
+    fallback = supabase.table("productos").select("id,codigo_producto").eq("id_empresa", id_empresa).execute()
+    return _pick_best_row_by_code(codigo, fallback.data or [])
 
 
 def _guardar_producto_desde_revision(id_empresa: str, revision: dict, drive_item: dict, proposed: dict):
@@ -887,7 +1306,7 @@ def _guardar_producto_desde_revision(id_empresa: str, revision: dict, drive_item
         "origen_catalogo": "drive",
         "piezas_por_caja": proposed.get("piezas_por_caja"),
         "proveedor_catalogo": "Proveedor Domus",
-        "origen_drive_file_id": drive_item.get("drive_file_id"),
+        "origen_drive_file_id": proposed.get("drive_file_real_id") or drive_item.get("drive_file_id"),
         "activo": True,
     }
     producto_id = revision.get("producto_id")
@@ -965,6 +1384,67 @@ def guardar_costo(datos: CostoProveedorIn, usuario=Depends(get_current_user)):
     row = _guardar_costo(id_empresa, codigo, datos.costo_adquisicion, datos.proveedor, datos.notas)
     supabase.table("productos").update({"costo_adquisicion": float(datos.costo_adquisicion)}).eq("id_empresa", id_empresa).eq("codigo_producto", codigo).execute()
     return {"mensaje": "Costo guardado", "data": row}
+
+
+@router.post("/catalogos/importar-pdfs-publicos")
+def importar_catalogos_publicos_pdf(
+    files: list[UploadFile] = File(...),
+    usuario=Depends(get_current_user),
+):
+    _id_empresa(usuario)
+    archivos = [file for file in files if file and (file.filename or "").lower().endswith(".pdf")]
+    if not archivos:
+        raise HTTPException(status_code=400, detail="Adjunta al menos un PDF valido")
+
+    google_config = _google_service_config()
+    resumen_global = {
+        "archivos_procesados": 0,
+        "productos_detectados": 0,
+        "archivos": [],
+    }
+
+    for archivo in archivos:
+        contenido = archivo.file.read()
+        file_id = f"upload:{uuid.uuid4().hex}"
+        ocr_error = None
+        try:
+            items, ocr_usado, extraction_source = _extract_catalog_items_with_optional_ocr(
+                contenido,
+                archivo.filename or "catalogo.pdf",
+                google_config,
+                file_id,
+            )
+        except HTTPException as exc:
+            items = []
+            ocr_usado = False
+            extraction_source = "error"
+            ocr_error = str(exc.detail)
+
+        warnings = _build_public_catalog_warnings(items, ocr_usado=ocr_usado)
+        ejemplos = []
+        for item in items[:8]:
+            ejemplos.append({
+                "nombre": item.get("nombre"),
+                "codigo_producto": item.get("codigo_producto"),
+                "precio_publico": item.get("precio_publico"),
+                "piezas_por_caja": item.get("piezas_por_caja"),
+            })
+
+        resumen_archivo = {
+            "nombre_archivo": archivo.filename,
+            "productos_detectados": len(items),
+            "ocr_usado": ocr_usado,
+            "ocr_error": ocr_error,
+            "origen_extraccion": extraction_source,
+            "requiere_revision": bool(warnings),
+            "advertencias": warnings,
+            "ejemplos": ejemplos,
+        }
+        resumen_global["archivos_procesados"] += 1
+        resumen_global["productos_detectados"] += len(items)
+        resumen_global["archivos"].append(resumen_archivo)
+
+    return {"mensaje": "Analisis de catalogos publicos completado", "resumen": resumen_global}
 
 
 @router.post("/costos/importar-pdfs")
