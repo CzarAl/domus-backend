@@ -113,8 +113,8 @@ for item in JUZGADOS_MR:
         JUZGADOS_MR_MAP[alias] = item
 
 PENDIENTE_ESTADOS = {"pendiente", "completado", "reprogramado", "archivado"}
-ACTIVIDAD_TIPOS = {"general", "emplazar", "diligencia", "audiencia", "otro"}
-ACTIVIDAD_TIPOS_CON_FECHA = {"emplazar", "diligencia", "audiencia"}
+ACTIVIDAD_TIPOS = {"general", "emplazar", "diligencia", "audiencia", "otro", "inicio_ejecucion", "dejar_de_actuar", "embargo", "otra"}
+ACTIVIDAD_TIPOS_CON_FECHA = {"emplazar", "diligencia", "audiencia", "inicio_ejecucion", "dejar_de_actuar", "embargo", "otra"}
 EXPEDIENTE_EDITABLES_LIBRES = {"estado", "seguimiento"}
 EXPEDIENTE_EDITABLES_SENSIBLES = {"expediente", "juzgado", "actor_demandado", "actividad", "fecha_vencimiento"}
 SUPABASE_WRITE_TIMEOUT_SECONDS = 12
@@ -387,6 +387,8 @@ def _normalizar_actividad_payload(payload: dict, parcial: bool = False):
             "juzgado",
             "descripcion",
             "fecha_actividad",
+            "hora_actividad",
+            "tipo_otro",
             "observaciones",
             "resultado",
         ],
@@ -403,16 +405,32 @@ def _normalizar_actividad_payload(payload: dict, parcial: bool = False):
 
     tipo = data.get("tipo")
     if tipo is None and not parcial:
-        tipo = "general"
+        tipo = "emplazar"
 
     if tipo is not None:
-        tipo_normalizado = str(tipo).strip().lower()
+        tipo_normalizado = str(tipo).strip().lower().replace(" ", "_")
+        if tipo_normalizado == "otro":
+            tipo_normalizado = "otra"
         if tipo_normalizado not in ACTIVIDAD_TIPOS:
             raise HTTPException(400, "Tipo de actividad invalido")
         data["tipo"] = tipo_normalizado
 
         if tipo_normalizado in ACTIVIDAD_TIPOS_CON_FECHA and not data.get("fecha_actividad") and not parcial:
             raise HTTPException(400, "Falta fecha de actividad")
+        if tipo_normalizado == "otra":
+            tipo_otro = re.sub(r"\s+", " ", str(data.get("tipo_otro") or "").strip())
+            if not tipo_otro and not parcial:
+                raise HTTPException(400, "Especifica el tipo de agenda")
+            data["tipo_otro"] = tipo_otro or None
+        elif "tipo_otro" in data:
+            data["tipo_otro"] = None
+
+    hora_actividad = data.get("hora_actividad")
+    if hora_actividad is not None:
+        hora_limpia = str(hora_actividad).strip()
+        if hora_limpia and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", hora_limpia):
+            raise HTTPException(400, "Hora de agenda invalida")
+        data["hora_actividad"] = hora_limpia or None
 
     if "cumplido" in data or not parcial:
         cumplido = _to_bool(data.get("cumplido"), default=False)
