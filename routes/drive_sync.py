@@ -260,9 +260,14 @@ def _extract_code_from_text(text: str, filename: str) -> str | None:
     return ranked[0][1]
 
 
+def _normalized_name_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "").encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", normalized).strip().upper()
+
+
 def _filename_name_tokens(filename: str) -> set[str]:
     base = os.path.splitext(filename or "")[0]
-    normalized = re.sub(r"[^A-Z0-9]+", " ", base.upper()).strip()
+    normalized = re.sub(r"[^A-Z0-9]+", " ", _normalized_name_text(base)).strip()
     return {token for token in normalized.split() if len(token) >= 4}
 
 
@@ -274,14 +279,15 @@ GENERIC_NAME_PATTERNS = [
     r"^DISPONIBLE(?:S)?$",
     r"^AGOTADO(?:S)?$",
     r"^CAT(?:ALOGO)?$",
+    r"^CAT\.?.*$",
 ]
 
 
 def _is_generic_catalog_name(line: str, filename: str) -> bool:
-    upper = re.sub(r"\s+", " ", (line or "").strip()).upper()
+    upper = _normalized_name_text(line)
     if not upper:
         return True
-    if "TEPEYAC" in upper or "CATALOGO" in upper:
+    if any(token in upper for token in ["TEPEYAC", "CATALOGO", "COMPRIMIDO", "PDF"]):
         return True
     if re.search(r"CODIGO|CLAVE|MODELO|SKU|PIEZAS|MEDIDAS|COLOR|PRECIO|PUBLICO|VENTA", upper):
         return True
@@ -300,7 +306,7 @@ def _is_generic_catalog_name(line: str, filename: str) -> bool:
 
 def _score_name_candidate(line: str, filename: str) -> int:
     clean = re.sub(r"\s+", " ", (line or "").strip())
-    upper = clean.upper()
+    upper = _normalized_name_text(clean)
     if len(clean) < 4:
         return -100
     if "$" in clean:
@@ -318,13 +324,13 @@ def _score_name_candidate(line: str, filename: str) -> int:
         score += 4
     if re.search(r"[A-Z]", upper) and not re.search(r"\d", clean):
         score += 3
-    if re.search(r"INTERIOR|LAMBRIN|MURO|PANEL|DECK|REVESTIMIENTO", upper):
+    if re.search(r"INTERIOR|LAMBRIN|MURO|PANEL|DECK|REVESTIMIENTO|PARED|FACHADA", upper):
         score += 4
     score += min(len(words), 5)
     return score
 
 
-def _extract_name_from_text(text: str, filename: str) -> str:
+def _extract_name_from_text(text: str, filename: str, *, allow_filename_fallback: bool = True) -> str:
     best_line = None
     best_score = -100
     if text:
@@ -336,11 +342,40 @@ def _extract_name_from_text(text: str, filename: str) -> str:
                 best_line = line
     if best_line and best_score >= 0:
         return best_line.title()[:140]
+    if not allow_filename_fallback:
+        return "Producto sin nombre"
     base = os.path.splitext(filename or "")[0]
     return re.sub(r"[_-]+", " ", base).strip()[:140] or "Producto sin nombre"
 
 
+def _extract_catalog_name_near_index(lines: list[str], index: int, filename: str) -> str:
+    start = max(0, index - 8)
+    end = min(len(lines), index + 3)
+    ranked = []
+    for pos in range(start, end):
+        line = re.sub(r"\s+", " ", (lines[pos] or "")).strip()
+        if not line:
+            continue
+        score = _score_name_candidate(line, filename)
+        if score < 0:
+            continue
+        distance = abs(index - pos)
+        if pos <= index:
+            score += 3
+        if distance <= 2:
+            score += 2
+        if distance >= 6:
+            score -= 2
+        ranked.append((score, -distance, -pos, line))
+    if ranked:
+        ranked.sort(reverse=True)
+        return ranked[0][3].title()[:140]
+    window = "\n".join(lines[start:end])
+    return _extract_name_from_text(window, filename, allow_filename_fallback=False)
+
+
 def _extract_pdf_text(file_bytes: bytes) -> str:
+
     try:
         from pypdf import PdfReader
     except Exception as exc:
@@ -516,7 +551,7 @@ def _extract_catalog_items_from_text(text: str, filename: str, file_id: str) -> 
         precio_publico = _extract_price_from_text(block_text)
         if precio_publico in (None, ""):
             continue
-        nombre = _extract_name_from_text("\n".join(lines[max(0, index - 3): min(len(lines), index + 2)]), filename)
+        nombre = _extract_catalog_name_near_index(lines, index, filename)
         descripcion = _description_from_lines(block_lines)
         codigo_producto = _extract_code_from_text(block_text, "")
         piezas_por_caja = _extract_pieces_from_text(block_text)
@@ -1255,7 +1290,13 @@ def _build_public_catalog_warnings(items: list[dict], *, ocr_usado: bool) -> lis
     missing_price = [item for item in items if item.get("precio_publico") in (None, "")]
     if missing_price:
         warnings.append(f"Hay {len(missing_price)} articulos sin precio_publico detectado.")
-    weak_names = [item for item in items if not item.get("nombre") or item.get("nombre") == "Producto sin nombre"]
+    weak_names = [
+        item
+        for item in items
+        if not item.get("nombre")
+        or item.get("nombre") == "Producto sin nombre"
+        or _is_generic_catalog_name(item.get("nombre") or "", "")
+    ]
     if weak_names:
         warnings.append(f"Hay {len(weak_names)} articulos con nombre debil o incompleto.")
     short_codes = [item.get("codigo_producto") for item in items if _row_requires_review({"codigo_producto": item.get("codigo_producto")}) and item.get("codigo_producto")]
