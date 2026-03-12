@@ -283,9 +283,19 @@ GENERIC_NAME_PATTERNS = [
 ]
 
 
-def _is_generic_catalog_name(line: str, filename: str) -> bool:
+def _catalog_line_key(line: str) -> str:
     upper = _normalized_name_text(line)
+    return re.sub(r"[^A-Z0-9]+", " ", upper).strip()
+
+
+def _is_generic_catalog_name(line: str, filename: str) -> bool:
+    clean = re.sub(r"\s+", " ", (line or "")).strip()
+    upper = _normalized_name_text(clean)
     if not upper:
+        return True
+    if clean.startswith(("-", "*", "•")) and len(clean.split()) <= 4:
+        return True
+    if clean.endswith(":") and len(clean.split()) <= 4:
         return True
     if any(token in upper for token in ["TEPEYAC", "CATALOGO", "COMPRIMIDO", "PDF"]):
         return True
@@ -304,15 +314,21 @@ def _is_generic_catalog_name(line: str, filename: str) -> bool:
     return False
 
 
-def _score_name_candidate(line: str, filename: str) -> int:
+def _score_name_candidate(line: str, filename: str, repeated_count: int = 1) -> int:
     clean = re.sub(r"\s+", " ", (line or "").strip())
     upper = _normalized_name_text(clean)
     if len(clean) < 4:
         return -100
+    if clean.startswith(("-", "*", "•")):
+        return -90
+    if clean.endswith(":") and len(clean.split()) <= 5:
+        return -90
     if "$" in clean:
         return -100
     if re.search(r"\b\d{2,}[.,]?\d*\b", clean):
         return -40
+    if repeated_count >= 4 and len(clean.split()) <= 4:
+        return -85
     if _is_generic_catalog_name(clean, filename):
         return -80
 
@@ -327,10 +343,13 @@ def _score_name_candidate(line: str, filename: str) -> int:
     if re.search(r"INTERIOR|LAMBRIN|MURO|PANEL|DECK|REVESTIMIENTO|PARED|FACHADA", upper):
         score += 4
     score += min(len(words), 5)
+    if repeated_count >= 3:
+        score -= min(8, repeated_count * 2)
     return score
 
 
 def _extract_name_from_text(text: str, filename: str, *, allow_filename_fallback: bool = True) -> str:
+
     best_line = None
     best_score = -100
     if text:
@@ -384,7 +403,13 @@ def _compose_catalog_name(base_name: str, variant_label: str | None) -> str:
     return f"{name} {variant_label}"[:140]
 
 
-def _extract_catalog_name_near_index(lines: list[str], index: int, filename: str, codigo_producto: str | None = None) -> str:
+def _extract_catalog_name_near_index(
+    lines: list[str],
+    index: int,
+    filename: str,
+    codigo_producto: str | None = None,
+    line_counts: dict[str, int] | None = None,
+) -> str:
     start = max(0, index - 8)
     end = min(len(lines), index + 3)
     ranked = []
@@ -392,7 +417,8 @@ def _extract_catalog_name_near_index(lines: list[str], index: int, filename: str
         line = re.sub(r"\s+", " ", (lines[pos] or "")).strip()
         if not line:
             continue
-        score = _score_name_candidate(line, filename)
+        repeated_count = (line_counts or {}).get(_catalog_line_key(line), 1)
+        score = _score_name_candidate(line, filename, repeated_count=repeated_count)
         if score < 0:
             continue
         distance = abs(index - pos)
@@ -579,6 +605,12 @@ def _extract_catalog_items_from_text(text: str, filename: str, file_id: str) -> 
         fallback["orden_detectado"] = 0
         return [fallback]
 
+    line_counts = {}
+    for line in lines:
+        key = _catalog_line_key(line)
+        if key:
+            line_counts[key] = line_counts.get(key, 0) + 1
+
     candidates = {}
     order = 0
     for index, line in enumerate(lines):
@@ -591,7 +623,7 @@ def _extract_catalog_items_from_text(text: str, filename: str, file_id: str) -> 
         if precio_publico in (None, ""):
             continue
         codigo_producto = _extract_code_from_text(block_text, "")
-        nombre = _extract_catalog_name_near_index(lines, index, filename, codigo_producto)
+        nombre = _extract_catalog_name_near_index(lines, index, filename, codigo_producto, line_counts=line_counts)
         descripcion = _description_from_lines(block_lines)
         piezas_por_caja = _extract_pieces_from_text(block_text)
         item = {
