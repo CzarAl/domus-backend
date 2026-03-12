@@ -108,6 +108,7 @@ def _normalizar_detalle(det: dict, productos_map: dict[str, dict]) -> dict:
         "subtotal": det.get("subtotal") or 0,
         "nombre_producto": det.get("nombre_producto") or (prod.get("nombre") if prod else None),
         "descripcion_producto": det.get("descripcion_producto") or (prod.get("descripcion") if prod else None),
+        "codigo_producto": det.get("codigo_producto") or (prod.get("codigo_producto") if prod else None),
         "foto_url": det.get("foto_url") or (prod.get("foto_url") if prod else prod.get("imagen_url") if prod else None),
     }
 
@@ -155,6 +156,7 @@ def _actualizar_snapshot_detalles(id_venta: str, productos_map: dict[str, dict])
         payload_full = {
             "nombre_producto": prod.get("nombre"),
             "descripcion_producto": prod.get("descripcion"),
+            "codigo_producto": prod.get("codigo_producto"),
             "foto_url": prod.get("foto_url") or prod.get("imagen_url"),
         }
         payload_min = {
