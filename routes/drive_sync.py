@@ -1651,6 +1651,7 @@ def importar_catalogos_publicos_pdf(
                 "precio_publico": precio_publico,
                 "piezas_por_caja": item.get("piezas_por_caja"),
                 "descripcion": item.get("descripcion"),
+                "orden_detectado": item.get("orden_detectado", index),
                 "costo_adquisicion": costo_adquisicion,
                 "utilidad_estimada": utilidad_estimada,
                 "margen_estimado": margen_estimado,
