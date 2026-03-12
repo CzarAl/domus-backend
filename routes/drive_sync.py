@@ -288,6 +288,29 @@ def _catalog_line_key(line: str) -> str:
     return re.sub(r"[^A-Z0-9]+", " ", upper).strip()
 
 
+def _is_spec_like_name(line: str) -> bool:
+    upper = _normalized_name_text(line)
+    if not upper:
+        return True
+    if re.search(r"\b(FRECUENCIA|POTENCIA|VOLTAJE|VOLTAGE|AMPERAJE|AMPERAJE|LUMEN(?:ES)?|TEMPERATURA|MEDIDA|MEDIDAS|DIMENSION(?:ES)?|CONTROL REMOTO|BLUETOOTH|WIFI|CRI|COLOR|MATERIAL)\b", upper):
+        return True
+    if ":" in (line or "") and re.search(r"\b\d+(?:\.\d+)?\s*(W|V|HZ|H|K|LM|G)\b", upper):
+        return True
+    if re.fullmatch(r"[A-Z]{1,4}\s+\d+(?:\.\d+)?[A-Z]+", upper):
+        return True
+    return False
+
+
+def _is_category_like_name(line: str) -> bool:
+    clean = re.sub(r"\s+", " ", (line or "")).strip()
+    upper = _normalized_name_text(clean)
+    if not upper:
+        return True
+    if any(symbol in clean for symbol in ["&", ","]) and len(clean.split()) >= 3 and not re.search(r"\d", clean):
+        return True
+    return False
+
+
 def _is_generic_catalog_name(line: str, filename: str) -> bool:
     clean = re.sub(r"\s+", " ", (line or "")).strip()
     upper = _normalized_name_text(clean)
@@ -296,6 +319,8 @@ def _is_generic_catalog_name(line: str, filename: str) -> bool:
     if clean.startswith(("-", "*", "•")) and len(clean.split()) <= 4:
         return True
     if clean.endswith(":") and len(clean.split()) <= 4:
+        return True
+    if _is_spec_like_name(clean) or _is_category_like_name(clean):
         return True
     if any(token in upper for token in ["TEPEYAC", "CATALOGO", "COMPRIMIDO", "PDF"]):
         return True
@@ -646,6 +671,13 @@ def _extract_catalog_items_from_text(text: str, filename: str, file_id: str) -> 
             quality += 2
         if piezas_por_caja:
             quality += 1
+        if not codigo_producto and (
+            nombre == "Producto sin nombre"
+            or _is_spec_like_name(nombre)
+            or _is_category_like_name(nombre)
+            or not descripcion
+        ):
+            continue
         existing = candidates.get(candidate_key)
         if not existing or quality > existing.get("_quality", -1):
             item["_quality"] = quality
@@ -1563,7 +1595,7 @@ def importar_catalogos_publicos_pdf(
     files: list[UploadFile] = File(...),
     usuario=Depends(get_current_user),
 ):
-    _id_empresa(usuario)
+    id_empresa = _id_empresa(usuario)
     archivos = [file for file in files if file and (file.filename or "").lower().endswith(".pdf")]
     if not archivos:
         raise HTTPException(status_code=400, detail="Adjunta al menos un PDF valido")
@@ -1594,13 +1626,44 @@ def importar_catalogos_publicos_pdf(
 
         warnings = _build_public_catalog_warnings(items, ocr_usado=ocr_usado)
         ejemplos = []
-        for item in items[:8]:
-            ejemplos.append({
+        items_payload = []
+        for index, item in enumerate(items):
+            codigo_producto = item.get("codigo_producto")
+            costo = _buscar_costo(id_empresa, codigo_producto) if codigo_producto else None
+            costo_adquisicion = float(costo.get("costo_adquisicion") or 0) if costo else None
+            precio_publico = item.get("precio_publico")
+            utilidad_estimada = None
+            margen_estimado = None
+            if precio_publico not in (None, "") and costo_adquisicion is not None:
+                try:
+                    utilidad_estimada = round(float(precio_publico) - float(costo_adquisicion), 2)
+                    if float(precio_publico) > 0:
+                        margen_estimado = round((utilidad_estimada / float(precio_publico)) * 100, 2)
+                except Exception:
+                    utilidad_estimada = None
+                    margen_estimado = None
+
+            payload_item = {
+                "id": item.get("candidate_key") or f"{file_id}:{index}",
+                "candidate_key": item.get("candidate_key") or f"{file_id}:{index}",
                 "nombre": item.get("nombre"),
-                "codigo_producto": item.get("codigo_producto"),
-                "precio_publico": item.get("precio_publico"),
+                "codigo_producto": codigo_producto,
+                "precio_publico": precio_publico,
                 "piezas_por_caja": item.get("piezas_por_caja"),
-            })
+                "descripcion": item.get("descripcion"),
+                "costo_adquisicion": costo_adquisicion,
+                "utilidad_estimada": utilidad_estimada,
+                "margen_estimado": margen_estimado,
+                "requiere_revision": not codigo_producto or not item.get("nombre") or item.get("nombre") == "Producto sin nombre",
+            }
+            items_payload.append(payload_item)
+            if index < 8:
+                ejemplos.append({
+                    "nombre": payload_item.get("nombre"),
+                    "codigo_producto": payload_item.get("codigo_producto"),
+                    "precio_publico": payload_item.get("precio_publico"),
+                    "piezas_por_caja": payload_item.get("piezas_por_caja"),
+                })
 
         resumen_archivo = {
             "nombre_archivo": archivo.filename,
@@ -1611,6 +1674,7 @@ def importar_catalogos_publicos_pdf(
             "requiere_revision": bool(warnings),
             "advertencias": warnings,
             "ejemplos": ejemplos,
+            "items": items_payload,
         }
         resumen_global["archivos_procesados"] += 1
         resumen_global["productos_detectados"] += len(items)
