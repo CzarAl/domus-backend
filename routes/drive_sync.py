@@ -260,22 +260,82 @@ def _extract_code_from_text(text: str, filename: str) -> str | None:
     return ranked[0][1]
 
 
+def _filename_name_tokens(filename: str) -> set[str]:
+    base = os.path.splitext(filename or "")[0]
+    normalized = re.sub(r"[^A-Z0-9]+", " ", base.upper()).strip()
+    return {token for token in normalized.split() if len(token) >= 4}
+
+
+GENERIC_NAME_PATTERNS = [
+    r"^\d+\s+SECCIONES?$",
+    r"^SECCIONES?$",
+    r"^PROXIMAMENTE$",
+    r"^NOVEDAD(?:ES)?$",
+    r"^DISPONIBLE(?:S)?$",
+    r"^AGOTADO(?:S)?$",
+    r"^CAT(?:ALOGO)?$",
+]
+
+
+def _is_generic_catalog_name(line: str, filename: str) -> bool:
+    upper = re.sub(r"\s+", " ", (line or "").strip()).upper()
+    if not upper:
+        return True
+    if "TEPEYAC" in upper or "CATALOGO" in upper:
+        return True
+    if re.search(r"CODIGO|CLAVE|MODELO|SKU|PIEZAS|MEDIDAS|COLOR|PRECIO|PUBLICO|VENTA", upper):
+        return True
+    if re.fullmatch(r"[A-Z0-9-]{4,}", upper):
+        return True
+    if any(re.fullmatch(pattern, upper) for pattern in GENERIC_NAME_PATTERNS):
+        return True
+    if re.search(r"\b\d+\s+SECCIONES?\b", upper):
+        return True
+    filename_tokens = _filename_name_tokens(filename)
+    line_tokens = {token for token in re.sub(r"[^A-Z0-9]+", " ", upper).split() if len(token) >= 4}
+    if filename_tokens and line_tokens and len(line_tokens & filename_tokens) >= max(2, len(line_tokens) - 1):
+        return True
+    return False
+
+
+def _score_name_candidate(line: str, filename: str) -> int:
+    clean = re.sub(r"\s+", " ", (line or "").strip())
+    upper = clean.upper()
+    if len(clean) < 4:
+        return -100
+    if "$" in clean:
+        return -100
+    if re.search(r"\b\d{2,}[.,]?\d*\b", clean):
+        return -40
+    if _is_generic_catalog_name(clean, filename):
+        return -80
+
+    score = 0
+    words = [word for word in clean.split() if word]
+    if len(words) >= 2:
+        score += 5
+    if 8 <= len(clean) <= 60:
+        score += 4
+    if re.search(r"[A-Z]", upper) and not re.search(r"\d", clean):
+        score += 3
+    if re.search(r"INTERIOR|LAMBRIN|MURO|PANEL|DECK|REVESTIMIENTO", upper):
+        score += 4
+    score += min(len(words), 5)
+    return score
+
+
 def _extract_name_from_text(text: str, filename: str) -> str:
+    best_line = None
+    best_score = -100
     if text:
-        for raw in text.splitlines()[:40]:
+        for raw in text.splitlines()[:50]:
             line = re.sub(r"\s+", " ", raw).strip()
-            upper = line.upper()
-            if len(line) < 4:
-                continue
-            if "TEPEYAC" in upper or "CATALOGO" in upper:
-                continue
-            if "$" in line or re.search(r"\b\d{2,}[.,]?\d*\b", line):
-                continue
-            if re.search(r"CODIGO|CLAVE|MODELO|SKU|PIEZAS|MEDIDAS|COLOR", upper):
-                continue
-            if re.fullmatch(r"[A-Z0-9-]{4,}", upper):
-                continue
-            return line.title()[:140]
+            score = _score_name_candidate(line, filename)
+            if score > best_score:
+                best_score = score
+                best_line = line
+    if best_line and best_score >= 0:
+        return best_line.title()[:140]
     base = os.path.splitext(filename or "")[0]
     return re.sub(r"[_-]+", " ", base).strip()[:140] or "Producto sin nombre"
 
