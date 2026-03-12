@@ -464,6 +464,17 @@ def _extract_catalog_name_near_index(
     return _compose_catalog_name(base_name, variant_label)
 
 
+def _page_marker(page_number: int) -> str:
+    return f"[[PAGE:{page_number}]]"
+
+
+def _parse_page_marker(line: str) -> int | None:
+    match = re.fullmatch(r"\[\[PAGE:(\d+)\]\]", (line or "").strip())
+    if not match:
+        return None
+    return int(match.group(1))
+
+
 def _extract_pdf_text(file_bytes: bytes) -> str:
 
     try:
@@ -477,11 +488,14 @@ def _extract_pdf_text(file_bytes: bytes) -> str:
         return ""
 
     chunks = []
-    for page in reader.pages[:12]:
+    for page_number, page in enumerate(reader.pages[:12], start=1):
         try:
-            chunks.append(page.extract_text() or "")
+            page_text = page.extract_text() or ""
         except Exception:
             continue
+        if page_text.strip():
+            chunks.append(_page_marker(page_number))
+            chunks.append(page_text)
     return "\n".join(chunks)
 
 
@@ -564,11 +578,13 @@ def _vision_ocr_pdf(file_bytes: bytes, filename: str, config: dict) -> str:
         file_responses = response_payload.get("responses") or []
         annotate_file = file_responses[0] if file_responses else {}
         image_responses = annotate_file.get("responses") or []
-        for image_response in image_responses:
+        for response_index, image_response in enumerate(image_responses):
             if image_response.get("error", {}).get("message"):
                 continue
             text_value = ((image_response.get("fullTextAnnotation") or {}).get("text") or "").strip()
             if text_value:
+                page_number = pages[response_index] if response_index < len(pages) else pages[0]
+                full_chunks.append(_page_marker(page_number))
                 full_chunks.append(text_value)
 
     return "\n".join(full_chunks)
@@ -622,12 +638,24 @@ def _candidate_key_for_item(file_id: str, data: dict, index: int) -> str:
 
 
 def _extract_catalog_items_from_text(text: str, filename: str, file_id: str) -> list[dict]:
-    lines = [re.sub(r"\s+", " ", line).strip() for line in (text or "").splitlines()]
-    lines = [line for line in lines if line]
+    raw_lines = [re.sub(r"\s+", " ", line).strip() for line in (text or "").splitlines()]
+    lines = []
+    line_pages: dict[int, int] = {}
+    current_page = 1
+    for raw_line in raw_lines:
+        if not raw_line:
+            continue
+        page_number = _parse_page_marker(raw_line)
+        if page_number is not None:
+            current_page = page_number
+            continue
+        line_pages[len(lines)] = current_page
+        lines.append(raw_line)
     if not lines:
         fallback = _extract_pdf_info_from_text(text, filename)
         fallback["candidate_key"] = _candidate_key_for_item(file_id, fallback, 0)
         fallback["orden_detectado"] = 0
+        fallback["page_detectada"] = 1
         return [fallback]
 
     line_counts = {}
@@ -658,6 +686,7 @@ def _extract_catalog_items_from_text(text: str, filename: str, file_id: str) -> 
             "piezas_por_caja": piezas_por_caja,
             "descripcion": descripcion,
             "orden_detectado": order,
+            "page_detectada": line_pages.get(index, 1),
         }
         candidate_key = _candidate_key_for_item(file_id, item, order)
         item["candidate_key"] = candidate_key
@@ -696,6 +725,7 @@ def _extract_catalog_items_from_text(text: str, filename: str, file_id: str) -> 
     fallback["candidate_key"] = _candidate_key_for_item(file_id, fallback, 0)
     fallback["codigo_normalizado"] = _canonical_code(fallback.get("codigo_producto"))
     fallback["orden_detectado"] = 0
+    fallback["page_detectada"] = 1
     return [fallback]
 
 
@@ -1652,6 +1682,7 @@ def importar_catalogos_publicos_pdf(
                 "piezas_por_caja": item.get("piezas_por_caja"),
                 "descripcion": item.get("descripcion"),
                 "orden_detectado": item.get("orden_detectado", index),
+                "page_detectada": item.get("page_detectada", 1),
                 "costo_adquisicion": costo_adquisicion,
                 "utilidad_estimada": utilidad_estimada,
                 "margen_estimado": margen_estimado,
